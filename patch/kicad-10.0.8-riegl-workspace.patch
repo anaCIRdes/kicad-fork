@@ -1,0 +1,3236 @@
+From b9864a946de3155660b9d6ed3129f9ea3159f2d2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Nov 2026 07:23:53 +0100
+Subject: [PATCH 1/5] Workspace fork: multi-project workspace pane, helper
+ processes, extended lock info
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ eeschema/files-io.cpp         |    3 +
+ include/lockfile.h            |  117 +++-
+ kicad/CMakeLists.txt          |    2 +
+ kicad/kicad.cpp               |   43 +-
+ kicad/kicad_id.h              |   11 +-
+ kicad/kicad_manager_frame.cpp |  229 ++++++-
+ kicad/kicad_manager_frame.h   |   37 ++
+ kicad/menubar.cpp             |   32 +
+ kicad/workspace.cpp           |  450 +++++++++++++
+ kicad/workspace.h             |  122 ++++
+ kicad/workspace_pane.cpp      | 1149 +++++++++++++++++++++++++++++++++
+ kicad/workspace_pane.h        |  151 +++++
+ pcbnew/files.cpp              |    3 +
+ translation/pofiles/de.po     |  241 +++++++
+ 14 files changed, 2560 insertions(+), 30 deletions(-)
+ create mode 100644 kicad/workspace.cpp
+ create mode 100644 kicad/workspace.h
+ create mode 100644 kicad/workspace_pane.cpp
+ create mode 100644 kicad/workspace_pane.h
+
+diff --git a/eeschema/files-io.cpp b/eeschema/files-io.cpp
+index d00f6d2f..d9efadee 100644
+--- a/eeschema/files-io.cpp
++++ b/eeschema/files-io.cpp
+@@ -131,6 +131,9 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
+             msg.Printf( _( "Schematic '%s' is already open by '%s' at '%s'." ), fullFileName,
+                     m_file_checker->GetUsername(), m_file_checker->GetHostname() );
+ 
++            if( !m_file_checker->GetDetails().IsEmpty() )
++                msg += wxS( "\n" ) + m_file_checker->GetDetails();
++
+             if( !AskOverrideLock( this, msg ) )
+                 return false;
+ 
+diff --git a/include/lockfile.h b/include/lockfile.h
+index 7022652b..82b5ae7a 100644
+--- a/include/lockfile.h
++++ b/include/lockfile.h
+@@ -34,6 +34,10 @@
+ #include <wx/filefn.h>
+ #include <wx/log.h>
+ #include <wx/filename.h>
++#include <wx/datetime.h>
++#include <wx/process.h>
++#include <wx/utils.h>
++#include <wx/app.h>
+ #include <json_common.h>
+ #include <wildcards_and_files_ext.h>
+ 
+@@ -43,7 +47,7 @@ class LOCKFILE
+ {
+ public:
+     LOCKFILE( const wxString &filename, bool aRemoveOnRelease = true ) :
+-            m_originalFile( filename ), m_fileCreated( false ), m_status( false ),
++            m_originalFile( filename ), m_pid( 0 ), m_fileCreated( false ), m_status( false ),
+             m_removeOnRelease( aRemoveOnRelease ), m_errorMsg( "" )
+     {
+         if( filename.IsEmpty() )
+@@ -83,13 +87,7 @@ public:
+             {
+                 m_fileCreated = true;
+                 m_status = true;
+-                m_username = wxGetUserId();
+-                m_hostname = wxGetHostName();
+-                nlohmann::json j;
+-                j["username"] = std::string( m_username.mb_str() );
+-                j["hostname"] = std::string( m_hostname.mb_str() );
+-                std::string lock_info = j.dump();
+-                file.Write( lock_info );
++                writeOwnerInfo( file );
+                 file.Close();
+                 wxLogTrace( LCK, "Locked %s", filename );
+             }
+@@ -104,8 +102,14 @@ public:
+                 try
+                 {
+                     nlohmann::json j = nlohmann::json::parse( std::string( lock_info.mb_str() ) );
+-                    m_username = wxString( j.at( "username" ).get<std::string>() );
+-                    m_hostname = wxString( j.at( "hostname" ).get<std::string>() );
++                    m_username = wxString::FromUTF8( j.at( "username" ).get<std::string>() );
++                    m_hostname = wxString::FromUTF8( j.at( "hostname" ).get<std::string>() );
++
++                    // Workspace fork: optional extended owner information.  Lock files written
++                    // by stock KiCad do not carry these keys.
++                    m_pid = j.value( "pid", 0L );
++                    m_since = wxString::FromUTF8( j.value( "since", std::string() ) );
++                    m_app = wxString::FromUTF8( j.value( "app", std::string() ) );
+                 }
+                 catch( const std::exception& parseError )
+                 {
+@@ -117,6 +121,14 @@ public:
+ 
+                 m_errorMsg = _( "Lock file already exists" );
+                 wxLogTrace( LCK, "Existing Lock for %s", filename );
++
++                // Workspace fork: a lock written on this computer by this user whose owning
++                // process no longer exists is a leftover of a crash.  Take it over silently.
++                if( OwnerProcessGone() )
++                {
++                    wxLogTrace( LCK, "Stale lock (owner process gone) for %s", filename );
++                    OverrideLock( aRemoveOnRelease );
++                }
+             }
+             else
+             {
+@@ -143,6 +155,9 @@ public:
+             m_lockFilename( std::move( other.m_lockFilename ) ),
+             m_username( std::move( other.m_username ) ),
+             m_hostname( std::move( other.m_hostname ) ),
++            m_since( std::move( other.m_since ) ),
++            m_app( std::move( other.m_app ) ),
++            m_pid( other.m_pid ),
+             m_fileCreated( other.m_fileCreated ),
+             m_status( other.m_status ),
+             m_removeOnRelease( other.m_removeOnRelease ),
+@@ -198,13 +213,7 @@ public:
+ 
+                 if( success )
+                 {
+-                    m_username = wxGetUserId();
+-                    m_hostname = wxGetHostName();
+-                    nlohmann::json j;
+-                    j["username"] = std::string( m_username.mb_str() );
+-                    j["hostname"] = std::string( m_hostname.mb_str() );
+-                    std::string lock_info = j.dump();
+-                    file.Write( lock_info );
++                    writeOwnerInfo( file );
+                     file.Close();
+                     m_fileCreated = true;
+                     m_status = true;
+@@ -255,6 +264,54 @@ public:
+      */
+     wxString GetHostname(){ return m_hostname; }
+ 
++    /**
++     * @return Process id of the lock owner, or 0 if unknown (lock written by stock KiCad).
++     */
++    long GetPid() const { return m_pid; }
++
++    /**
++     * @return ISO date/time (local time of the owner) at which the lock was taken, may be empty.
++     */
++    wxString GetSince() const { return m_since; }
++
++    /**
++     * @return Name of the application that took the lock, may be empty.
++     */
++    wxString GetApp() const { return m_app; }
++
++    /**
++     * @return true if the lock was written on this computer by this user and the process that
++     *         wrote it no longer exists (i.e. the lock is a leftover of a crash).
++     */
++    bool OwnerProcessGone() const
++    {
++        if( m_fileCreated || m_pid <= 0 )
++            return false;
++
++        if( m_username != wxGetUserId() || m_hostname != wxGetHostName() )
++            return false;
++
++        return !wxProcess::Exists( static_cast<int>( m_pid ) );
++    }
++
++    /**
++     * @return A human readable extra line describing since when and by which application the
++     *         file is held, or an empty string if the lock carries no extended information.
++     */
++    wxString GetDetails() const
++    {
++        if( m_since.IsEmpty() )
++            return wxEmptyString;
++
++        wxString since = m_since;
++        since.Replace( wxS( "T" ), wxS( " " ) );
++
++        if( m_app.IsEmpty() )
++            return wxString::Format( _( "Opened since %s." ), since );
++
++        return wxString::Format( _( "Opened since %s with '%s'." ), since, m_app );
++    }
++
+     /**
+      * @return Last error message generated.
+      */
+@@ -280,11 +337,33 @@ private:
+     wxString m_lockFilename;
+     wxString m_username;
+     wxString m_hostname;
++    wxString m_since;
++    wxString m_app;
++    long     m_pid;
+     bool m_fileCreated;
+     bool m_status;
+     bool m_removeOnRelease;
+     wxString m_errorMsg;
+ 
++    /// Write the owner record (stock KiCad keys plus the workspace fork extensions).
++    void writeOwnerInfo( wxFile& aFile )
++    {
++        m_username = wxGetUserId();
++        m_hostname = wxGetHostName();
++        m_pid = static_cast<long>( wxGetProcessId() );
++        m_since = wxDateTime::Now().FormatISOCombined();
++        m_app = wxTheApp ? wxTheApp->GetAppName() : wxString();
++
++        nlohmann::json j;
++        j["username"] = std::string( m_username.utf8_str() );
++        j["hostname"] = std::string( m_hostname.utf8_str() );
++        j["pid"] = m_pid;
++        j["since"] = std::string( m_since.utf8_str() );
++        j["app"] = std::string( m_app.utf8_str() );
++        std::string lock_info = j.dump();
++        aFile.Write( lock_info.data(), lock_info.size() );
++    }
++
+     bool checkUserAndHost()
+     {
+         wxFileName fileName( m_lockFilename );
+@@ -305,8 +384,8 @@ private:
+                 file.ReadAll( &lock_info );
+                 nlohmann::json j = nlohmann::json::parse( std::string( lock_info.mb_str() ) );
+ 
+-                if( m_username == wxString( j["username"].get<std::string>() )
+-                        && m_hostname == wxString( j["hostname"].get<std::string>() ) )
++                if( m_username == wxString::FromUTF8( j["username"].get<std::string>() )
++                        && m_hostname == wxString::FromUTF8( j["hostname"].get<std::string>() ) )
+                 {
+                     wxLogTrace( LCK, "User and host match for lock %s", m_lockFilename );
+                     return true;
+diff --git a/kicad/CMakeLists.txt b/kicad/CMakeLists.txt
+index dae7b75f..dc785e66 100644
+--- a/kicad/CMakeLists.txt
++++ b/kicad/CMakeLists.txt
+@@ -45,6 +45,8 @@ set( KICAD_SRCS
+     project_tree_item.cpp
+     project_tree_traverser.cpp
+     update_manager.cpp
++    workspace.cpp
++    workspace_pane.cpp
+     toolbars_kicad_manager.cpp
+     tools/kicad_manager_actions.cpp
+     tools/kicad_manager_control.cpp
+diff --git a/kicad/kicad.cpp b/kicad/kicad.cpp
+index 7a1a5baa..213626ef 100644
+--- a/kicad/kicad.cpp
++++ b/kicad/kicad.cpp
+@@ -118,6 +118,12 @@ bool PGM_KICAD::OnPgmInit()
+         { wxCMD_LINE_SWITCH, nullptr, "software-rendering", "Use software rendering instead of OpenGL",
+           wxCMD_LINE_VAL_NONE, 0 },
+ #endif
++        // Workspace fork: internal options used when the workspace manager starts a helper
++        // process hosting the editors of one project.
++        { wxCMD_LINE_OPTION, nullptr, "ws-child", "Internal: run as workspace helper (command folder)",
++          wxCMD_LINE_VAL_STRING, 0 },
++        { wxCMD_LINE_OPTION, nullptr, "ws-open", "Internal: editor to open in a workspace helper (sch|pcb)",
++          wxCMD_LINE_VAL_STRING, 0 },
+         { wxCMD_LINE_PARAM, nullptr, nullptr, "File to load", wxCMD_LINE_VAL_STRING,
+           wxCMD_LINE_PARAM_MULTIPLE | wxCMD_LINE_PARAM_OPTIONAL },
+         { wxCMD_LINE_NONE, nullptr, nullptr, nullptr, wxCMD_LINE_VAL_NONE, 0 }
+@@ -257,14 +263,30 @@ bool PGM_KICAD::OnPgmInit()
+     KIWAY_PLAYER* playerFrame = nullptr;
+     KICAD_MANAGER_FRAME* managerFrame = nullptr;
+ 
++    // Workspace fork
++    wxString wsChildDir;
++    wxString wsOpen = wxS( "sch" );
++    bool     wsChild = false;
++    bool     wsLoaded = false;
++
++    if( appType == KICAD_MAIN_FRAME_T && parser.Found( "ws-child", &wsChildDir ) && !wsChildDir.IsEmpty() )
++    {
++        wsChild = true;
++        parser.Found( "ws-open", &wsOpen );
++        KICAD_MANAGER_FRAME::s_WorkspaceChildDir = wsChildDir;
++    }
++
+     if( appType == KICAD_MAIN_FRAME_T )
+     {
+         managerFrame = new KICAD_MANAGER_FRAME( nullptr, wxT( "KiCad" ), wxDefaultPosition,
+                                                 wxWindow::FromDIP( wxSize( 775, -1 ), NULL ) );
+         frame = managerFrame;
+ 
+-        STARTWIZARD startWizard;
+-        startWizard.CheckAndRun( frame );
++        if( !wsChild )
++        {
++            STARTWIZARD startWizard;
++            startWizard.CheckAndRun( frame );
++        }
+     }
+     else
+     {
+@@ -374,7 +396,8 @@ bool PGM_KICAD::OnPgmInit()
+         }
+ 
+         // If no file was given as an argument, check that there was a file open.
+-        if( projToLoad.IsEmpty() && settings->m_OpenProjects.size() && !parser.FoundSwitch( "new" ) )
++        if( projToLoad.IsEmpty() && !wsChild && settings->m_OpenProjects.size()
++            && !parser.FoundSwitch( "new" ) )
+         {
+             wxString last_pro = settings->m_OpenProjects.front();
+             settings->m_OpenProjects.erase( settings->m_OpenProjects.begin() );
+@@ -406,10 +429,20 @@ bool PGM_KICAD::OnPgmInit()
+ 
+         if( !loaded && appType == KICAD_MAIN_FRAME_T )
+             managerFrame->PreloadAllLibraries();
++
++        wsLoaded = loaded;
+     }
+ 
+-    frame->Show( true );
+-    frame->Raise();
++    if( wsChild && managerFrame )
++    {
++        // The manager window of a workspace helper stays hidden; only its editors show up.
++        managerFrame->StartWorkspaceChild( wsOpen, wsLoaded );
++    }
++    else
++    {
++        frame->Show( true );
++        frame->Raise();
++    }
+ 
+ #ifdef KICAD_IPC_API
+     m_api_server->SetReadyToReply();
+diff --git a/kicad/kicad_id.h b/kicad/kicad_id.h
+index cb151833..29ac9048 100644
+--- a/kicad/kicad_id.h
++++ b/kicad/kicad_id.h
+@@ -42,7 +42,16 @@ enum id_kicad_frm {
+     ID_IMPORT_EASYEDAPRO_PROJECT,
+     ID_IMPORT_ALTIUM_PROJECT,
+     ID_IMPORT_PADS_PROJECT,
+-    ID_IMPORT_GEDA_PROJECT
++    ID_IMPORT_GEDA_PROJECT,
++
++    // Workspace fork
++    ID_WORKSPACE_NEW,
++    ID_WORKSPACE_OPEN,
++    ID_WORKSPACE_SAVE_AS,
++    ID_WORKSPACE_ADD_PROJECT,
++    ID_WORKSPACE_ADD_ACTIVE,
++    ID_WORKSPACE_REFRESH,
++    ID_WORKSPACE_TOGGLE_PANE
+ };
+ 
+ #endif
+diff --git a/kicad/kicad_manager_frame.cpp b/kicad/kicad_manager_frame.cpp
+index 65b42636..6ec73a27 100644
+--- a/kicad/kicad_manager_frame.cpp
++++ b/kicad/kicad_manager_frame.cpp
+@@ -28,6 +28,7 @@
+ #include "pgm_kicad.h"
+ #include "project_tree_pane.h"
+ #include "local_history_pane.h"
++#include "workspace_pane.h"
+ #include "widgets/bitmap_button.h"
+ 
+ #include <advanced_config.h>
+@@ -77,6 +78,7 @@
+ #include <wx/ffile.h>
+ #include <wx/filedlg.h>
+ #include <wx/dnd.h>
++#include <wx/dir.h>
+ #include <wx/process.h>
+ #include <wx/snglinst.h>
+ #include <algorithm>
+@@ -101,6 +103,7 @@
+ 
+ #define EDITORS_CAPTION _( "Editors" )
+ #define PROJECT_FILES_CAPTION _( "Project Files" )
++#define WORKSPACE_CAPTION _( "Workspace" )
+ 
+ #define ID_INIT_WATCHED_PATHS 52913
+ 
+@@ -132,6 +135,9 @@ BEGIN_EVENT_TABLE( KICAD_MANAGER_FRAME, EDA_BASE_FRAME )
+     // Special functions
+     EVT_MENU( ID_INIT_WATCHED_PATHS, KICAD_MANAGER_FRAME::OnChangeWatchedPaths )
+ 
++    // Workspace fork
++    EVT_MENU_RANGE( ID_WORKSPACE_NEW, ID_WORKSPACE_TOGGLE_PANE, KICAD_MANAGER_FRAME::OnWorkspaceMenu )
++
+     // Drop files event
+     EVT_DROP_FILES( KICAD_MANAGER_FRAME::OnDropFiles )
+ 
+@@ -140,6 +146,9 @@ END_EVENT_TABLE()
+ // See below the purpose of this include
+ #include <wx/xml/xml.h>
+ 
++wxString KICAD_MANAGER_FRAME::s_WorkspaceChildDir;
++
++
+ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& title,
+                                           const wxPoint& pos, const wxSize&   size ) :
+         EDA_BASE_FRAME( parent, KICAD_MAIN_FRAME_T, title, pos, size, KICAD_DEFAULT_DRAWFRAME_STYLE,
+@@ -153,7 +162,11 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+         m_launcher( nullptr ),
+         m_lastToolbarIconSize( 0 ),
+         m_pcmButton( nullptr ),
+-        m_pcmUpdateCount( 0 )
++        m_pcmUpdateCount( 0 ),
++        m_workspacePane( nullptr ),
++        m_wsChildBusy( false ),
++        m_wsChildStarted( false ),
++        m_wsChildIdleTicks( 0 )
+ {
+     const int defaultLeftWinWidth = FromDIP( 250 );
+ 
+@@ -233,14 +246,27 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+ 
+     // There is no wxAUIPaneInfo::SetSize(), but a trick is to use MinSize() to set the required pane width,
+     // and after give a reasonable MinSize value.
++    // Workspace fork: the list of all workspace projects sits above the file tree of the
++    // active project.  A workspace helper process has no visible manager and needs no pane.
++    if( !IsWorkspaceChild() )
++    {
++        m_workspacePane = new WORKSPACE_PANE( this );
++        m_auimgr.AddPane( m_workspacePane,
++                          EDA_PANE().Palette().Name( "Workspace" ).Left().Layer( 1 ).Position( 0 )
++                                    .Caption( WORKSPACE_CAPTION ).PaneBorder( false )
++                                    .BestSize( m_leftWinWidth, FromDIP( 260 ) )
++                                    .MinSize( m_leftWinWidth, FromDIP( 120 ) )
++                                    .Floatable( false ).Movable( false ).CloseButton( true ) );
++    }
++
+     m_auimgr.AddPane( m_projectTreePane,
+-                      EDA_PANE().Palette().Name( "ProjectTree" ).Left().Layer( 1 )
++                      EDA_PANE().Palette().Name( "ProjectTree" ).Left().Layer( 1 ).Position( 1 )
+                                 .Caption( PROJECT_FILES_CAPTION ).PaneBorder( false )
+                                 .MinSize( m_leftWinWidth, -1 ).Floatable( false ).Movable( false ) );
+ 
+     m_historyPane = new LOCAL_HISTORY_PANE( this );
+     m_auimgr.AddPane( m_historyPane,
+-                      EDA_PANE().Palette().Name( "LocalHistory" ).Left().Layer( 1 ).Position( 1 )
++                      EDA_PANE().Palette().Name( "LocalHistory" ).Left().Layer( 1 ).Position( 2 )
+                                 .Caption( _( "Local History" ) ).PaneBorder( false )
+                                 .Floatable( false ).Movable( false ).CloseButton( true ).Hide() );
+ 
+@@ -273,6 +299,9 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+     // Now the actual m_projectTreePane size is set, give it a reasonable min width
+     m_auimgr.GetPane( m_projectTreePane ).MinSize( defaultLeftWinWidth, FromDIP( 80 ) );
+ 
++    if( m_workspacePane )
++        m_auimgr.GetPane( m_workspacePane ).MinSize( defaultLeftWinWidth, FromDIP( 80 ) );
++
+ 
+     wxSizer* mainSizer = GetSizer();
+ 
+@@ -308,6 +337,8 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+ 
+ KICAD_MANAGER_FRAME::~KICAD_MANAGER_FRAME()
+ {
++    m_wsChildTimer.Stop();
++
+     Unbind( wxEVT_CHAR, &TOOL_DISPATCHER::DispatchWxEvent, m_toolDispatcher );
+     Unbind( wxEVT_CHAR_HOOK, &TOOL_DISPATCHER::DispatchWxEvent, m_toolDispatcher );
+ 
+@@ -686,7 +717,10 @@ void KICAD_MANAGER_FRAME::DoWithAcceptedFiles()
+ bool KICAD_MANAGER_FRAME::canCloseWindow( wxCloseEvent& aEvent )
+ {
+     KICAD_SETTINGS* settings = kicadSettings();
+-    settings->m_OpenProjects = GetSettingsManager()->GetOpenProjects();
++
++    // A workspace helper must not change the "last open project" of the user's KiCad session
++    if( !IsWorkspaceChild() )
++        settings->m_OpenProjects = GetSettingsManager()->GetOpenProjects();
+ 
+     for( size_t i = 0; i < m_notebook->GetPageCount(); i++ )
+     {
+@@ -703,6 +737,11 @@ bool KICAD_MANAGER_FRAME::canCloseWindow( wxCloseEvent& aEvent )
+     // If any of them cancel then we need to cancel closing the KICAD_MANAGER_FRAME.
+     if( CloseProject( true ) )
+     {
++        // Workspace fork: the editors of the other workspace projects live in helper
++        // processes; ask them to close as well (they prompt for unsaved changes themselves).
++        if( m_workspacePane )
++            m_workspacePane->CloseChildren();
++
+         // Don't propagate event to frames which have already been closed
+         aEvent.StopPropagation();
+ 
+@@ -950,6 +989,9 @@ bool KICAD_MANAGER_FRAME::LoadProject( const wxFileName& aProjectFileName )
+                         lockFile.GetUsername(),
+                         lockFile.GetHostname() );
+ 
++            if( !lockFile.GetDetails().IsEmpty() )
++                msg += wxS( "\n" ) + lockFile.GetDetails();
++
+             if( !AskOverrideLock( this, msg ) )
+                 return false;  // User clicked Cancel - abort project loading entirely
+ 
+@@ -1050,6 +1092,11 @@ bool KICAD_MANAGER_FRAME::LoadProject( const wxFileName& aProjectFileName )
+     // Now that we have a new project, trigger a library preload, which will load in any
+     // project-specific symbol and footprint libraries into the manager
+     PreloadAllLibraries();
++
++    // Workspace fork: every opened project stays listed in the workspace
++    if( m_workspacePane )
++        m_workspacePane->OnProjectLoaded( Prj().GetProjectFullName() );
++
+     return true;
+ }
+ 
+@@ -1213,6 +1260,13 @@ void KICAD_MANAGER_FRAME::ShowChangedLanguage()
+         m_notebook->SetPageText( pageId, EDITORS_CAPTION );
+ 
+     m_auimgr.GetPane( m_projectTreePane ).Caption( PROJECT_FILES_CAPTION );
++
++    if( m_workspacePane )
++    {
++        m_auimgr.GetPane( m_workspacePane ).Caption( WORKSPACE_CAPTION );
++        m_workspacePane->ShowChangedLanguage();
++    }
++
+     m_auimgr.Update();
+ 
+     m_projectTreePane->FileWatcherReset();
+@@ -1271,6 +1325,9 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
+                         lockFile.GetUsername(),
+                         lockFile.GetHostname() );
+ 
++            if( !lockFile.GetDetails().IsEmpty() )
++                msg += wxS( "\n" ) + lockFile.GetDetails();
++
+             if( AskOverrideLock( this, msg ) )
+             {
+                 lockFile.OverrideLock();
+@@ -1304,6 +1361,9 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
+ 
+     SetTitle( title );
+ 
++    if( m_workspacePane )
++        m_workspacePane->ActiveProjectChanged();
++
+     // Register project file saver. Ensures project file participates in
+     // autosave history commits without affecting dirty state.
+     Kiway().LocalHistory().RegisterSaver( &Prj(),
+@@ -1339,11 +1399,170 @@ void KICAD_MANAGER_FRAME::SaveSettings( APP_SETTINGS_BASE* aCfg )
+     settings->m_LeftWinWidth = m_projectTreePane->GetSize().x;
+     settings->m_ShowHistoryPanel = m_historyPane && m_auimgr.GetPane( m_historyPane ).IsShown();
+ 
+-    if( !m_isClosing )
++    if( !m_isClosing && !IsWorkspaceChild() )
+         settings->m_OpenProjects = GetSettingsManager()->GetOpenProjects();
+ }
+ 
+ 
++// -------------------------------------------------------------------------------------------
++// Workspace fork
++// -------------------------------------------------------------------------------------------
++
++void KICAD_MANAGER_FRAME::OnWorkspaceMenu( wxCommandEvent& aEvent )
++{
++    if( !m_workspacePane )
++        return;
++
++    switch( aEvent.GetId() )
++    {
++    case ID_WORKSPACE_NEW:         m_workspacePane->NewWorkspace();     break;
++    case ID_WORKSPACE_OPEN:        m_workspacePane->OpenWorkspace();    break;
++    case ID_WORKSPACE_SAVE_AS:     m_workspacePane->SaveWorkspaceAs();  break;
++    case ID_WORKSPACE_ADD_PROJECT: m_workspacePane->AddProjectDialog(); break;
++    case ID_WORKSPACE_ADD_ACTIVE:  m_workspacePane->AddActiveProject(); break;
++    case ID_WORKSPACE_REFRESH:     m_workspacePane->RequestScan();      break;
++
++    case ID_WORKSPACE_TOGGLE_PANE:
++    {
++        wxAuiPaneInfo& pane = m_auimgr.GetPane( m_workspacePane );
++        pane.Show( !pane.IsShown() );
++        m_auimgr.Update();
++        break;
++    }
++
++    default:
++        break;
++    }
++}
++
++
++void KICAD_MANAGER_FRAME::StartWorkspaceChild( const wxString& aOpen, bool aProjectLoaded )
++{
++    // Never restore the editors that were open in the last session of this project: the
++    // workspace asked for exactly one editor.
++    m_openSavedWindows = false;
++
++    if( !aProjectLoaded )
++    {
++        // Loading failed or the user declined to open a project that is in use elsewhere.
++        CallAfter(
++                [this]()
++                {
++                    Close( true );
++                } );
++        return;
++    }
++
++    m_wsChildTimer.SetOwner( this );
++    Bind( wxEVT_TIMER, &KICAD_MANAGER_FRAME::onWorkspaceChildTimer, this, m_wsChildTimer.GetId() );
++
++    CallAfter(
++            [this, aOpen]()
++            {
++                runWorkspaceChildCommand( aOpen );
++                m_wsChildStarted = true;
++                m_wsChildTimer.Start( 400 );
++            } );
++}
++
++
++void KICAD_MANAGER_FRAME::runWorkspaceChildCommand( const wxString& aCommand )
++{
++    if( aCommand == wxS( "quit" ) )
++    {
++        Close( false );
++        return;
++    }
++
++    if( m_wsChildBusy )
++        return;
++
++    m_wsChildBusy = true;
++
++    if( aCommand == wxS( "sch" ) )
++        GetToolManager()->RunAction( KICAD_MANAGER_ACTIONS::editSchematic );
++    else if( aCommand == wxS( "pcb" ) )
++        GetToolManager()->RunAction( KICAD_MANAGER_ACTIONS::editPCB );
++
++    m_wsChildBusy = false;
++}
++
++
++void KICAD_MANAGER_FRAME::onWorkspaceChildTimer( wxTimerEvent& aEvent )
++{
++    if( m_wsChildBusy || m_isClosing || !m_wsChildStarted )
++        return;
++
++    int  visibleWindows = 0;
++    bool modalActive = false;
++
++    for( wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node;
++         node = node->GetNext() )
++    {
++        wxWindow* win = node->GetData();
++
++        if( win == this || !win->IsShown() )
++            continue;
++
++        visibleWindows++;
++
++        if( wxDialog* dlg = dynamic_cast<wxDialog*>( win ) )
++            modalActive |= dlg->IsModal();
++    }
++
++    // Commands of the workspace manager: one small file per command, processed in order.
++    if( !modalActive && wxDir::Exists( s_WorkspaceChildDir ) )
++    {
++        wxArrayString files;
++
++        {
++            wxLogNull noLog;
++            wxDir::GetAllFiles( s_WorkspaceChildDir, &files, wxS( "*.cmd" ), wxDIR_FILES );
++        }
++
++        files.Sort();
++
++        for( const wxString& file : files )
++        {
++            wxString command;
++
++            {
++                wxLogNull noLog;
++                wxFFile   in( file, wxS( "rb" ) );
++
++                if( in.IsOpened() )
++                    in.ReadAll( &command, wxConvUTF8 );
++            }
++
++            wxRemoveFile( file );
++            command.Trim().Trim( false );
++
++            if( command.IsEmpty() )
++                continue;
++
++            runWorkspaceChildCommand( command );
++
++            // Anything may have happened while the editor was opening; start over next tick.
++            return;
++        }
++    }
++
++    // The helper ends together with its last editor window.
++    if( visibleWindows == 0 )
++    {
++        if( ++m_wsChildIdleTicks >= 3 )
++        {
++            m_wsChildTimer.Stop();
++            Close( false );
++        }
++    }
++    else
++    {
++        m_wsChildIdleTicks = 0;
++    }
++}
++
++
+ void KICAD_MANAGER_FRAME::PrintPrjInfo()
+ {
+     wxString status = wxString::Format( _( "Project: %s" ), Prj().GetProjectFullName() );
+diff --git a/kicad/kicad_manager_frame.h b/kicad/kicad_manager_frame.h
+index 6fb670b6..de152f59 100644
+--- a/kicad/kicad_manager_frame.h
++++ b/kicad/kicad_manager_frame.h
+@@ -26,6 +26,7 @@
+ #define KICAD_H
+ 
+ #include <kiway_player.h>
++#include <wx/timer.h>
+ 
+ class ACTION_TOOLBAR;
+ class BITMAP_BUTTON;
+@@ -36,6 +37,7 @@ class PLUGIN_CONTENT_MANAGER;
+ class PROJECT_TREE;
+ class PROJECT_TREE_PANE;
+ class LOCAL_HISTORY_PANE;
++class WORKSPACE_PANE;
+ class UPDATE_MANAGER;
+ 
+ /**
+@@ -51,6 +53,31 @@ public:
+ 
+     void OnIdle( wxIdleEvent& event );
+ 
++    // ---- Workspace fork -------------------------------------------------------------------
++
++    /**
++     * Folder polled for commands when this process is a workspace helper ("--ws-child").
++     * Must be set before the frame is constructed.  Empty in a normal KiCad session.
++     */
++    static wxString s_WorkspaceChildDir;
++
++    bool IsWorkspaceChild() const { return !s_WorkspaceChildDir.IsEmpty(); }
++
++    /**
++     * Turn this (hidden) manager into the host of the editors of one workspace project.
++     *
++     * @param aOpen is "sch" or "pcb": the editor to open first.
++     * @param aProjectLoaded is false if loading the project failed or was cancelled; the
++     *                       helper process then simply ends.
++     */
++    void StartWorkspaceChild( const wxString& aOpen, bool aProjectLoaded );
++
++    WORKSPACE_PANE* GetWorkspacePane() const { return m_workspacePane; }
++
++    void OnWorkspaceMenu( wxCommandEvent& aEvent );
++
++    // ----------------------------------------------------------------------------------------
++
+     bool canCloseWindow( wxCloseEvent& aCloseEvent ) override;
+     void doCloseWindow() override;
+     void OnSize( wxSizeEvent& event ) override;
+@@ -244,6 +271,9 @@ private:
+ 
+     void updatePcmButtonBadge();
+ 
++    void onWorkspaceChildTimer( wxTimerEvent& aEvent );
++    void runWorkspaceChildCommand( const wxString& aCommand );
++
+ private:
+     bool                  m_openSavedWindows;
+     bool                  m_restoredFromHistory;  ///< Set after restore to mark editors dirty
+@@ -261,6 +291,13 @@ private:
+     BITMAP_BUTTON*                          m_pcmButton;
+     int                                     m_pcmUpdateCount;
+     std::unique_ptr<UPDATE_MANAGER>         m_updateManager;
++
++    // Workspace fork
++    WORKSPACE_PANE*       m_workspacePane;
++    wxTimer               m_wsChildTimer;
++    bool                  m_wsChildBusy;       ///< an editor is being opened right now
++    bool                  m_wsChildStarted;    ///< the first editor has been requested
++    int                   m_wsChildIdleTicks;  ///< consecutive ticks without any window
+ };
+ 
+ 
+diff --git a/kicad/menubar.cpp b/kicad/menubar.cpp
+index 27961bd0..e717fe74 100644
+--- a/kicad/menubar.cpp
++++ b/kicad/menubar.cpp
+@@ -91,6 +91,38 @@ void KICAD_MANAGER_FRAME::doReCreateMenuBar()
+ 
+     wxMenuItem* item = fileMenu->Add( openRecentMenu->Clone() );
+ 
++    // Workspace fork
++    ACTION_MENU* workspaceMenu = new ACTION_MENU( false, controlTool );
++    workspaceMenu->SetTitle( _( "Workspace" ) );
++    workspaceMenu->SetIcon( BITMAPS::directory );
++
++    workspaceMenu->Add( _( "Add Project to Workspace..." ),
++                        _( "Add one or more existing projects to the workspace" ),
++                        ID_WORKSPACE_ADD_PROJECT, BITMAPS::small_plus );
++    workspaceMenu->Add( _( "Add Active Project to Workspace" ),
++                        _( "Add the project that is open in this window to the workspace" ),
++                        ID_WORKSPACE_ADD_ACTIVE, BITMAPS::small_plus );
++    workspaceMenu->AppendSeparator();
++    workspaceMenu->Add( _( "New Workspace..." ),
++                        _( "Create a new, empty workspace file" ),
++                        ID_WORKSPACE_NEW, BITMAPS::new_project );
++    workspaceMenu->Add( _( "Open Workspace..." ),
++                        _( "Open a workspace file (a list of projects)" ),
++                        ID_WORKSPACE_OPEN, BITMAPS::open_project );
++    workspaceMenu->Add( _( "Save Workspace As..." ),
++                        _( "Save the list of workspace projects to a new workspace file" ),
++                        ID_WORKSPACE_SAVE_AS, BITMAPS::save_as );
++    workspaceMenu->AppendSeparator();
++    workspaceMenu->Add( _( "Refresh Lock States" ),
++                        _( "Rescan the workspace projects for files opened by other users" ),
++                        ID_WORKSPACE_REFRESH, BITMAPS::small_refresh );
++    workspaceMenu->Add( _( "Show/Hide Workspace Pane" ),
++                        _( "Show or hide the workspace pane" ),
++                        ID_WORKSPACE_TOGGLE_PANE, BITMAPS::directory );
++
++    fileMenu->AppendSeparator();
++    fileMenu->Add( workspaceMenu );
++
+     fileMenu->AppendSeparator();
+     fileMenu->Add( KICAD_MANAGER_ACTIONS::newJobsetFile );
+     fileMenu->Add( KICAD_MANAGER_ACTIONS::openJobsetFile );
+diff --git a/kicad/workspace.cpp b/kicad/workspace.cpp
+new file mode 100644
+index 00000000..a3b5bfbd
+--- /dev/null
++++ b/kicad/workspace.cpp
+@@ -0,0 +1,450 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork (multi-project manager with network lock overview).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "workspace.h"
++
++#include <algorithm>
++
++#include <wx/dir.h>
++#include <wx/ffile.h>
++#include <wx/filename.h>
++#include <wx/log.h>
++#include <wx/process.h>
++#include <wx/utils.h>
++
++#include <json_common.h>
++#include <paths.h>
++#include <wildcards_and_files_ext.h>
++
++
++namespace
++{
++/// How deep below the project folder schematics and boards are searched.
++const int SCAN_MAX_DEPTH = 2;
++
++/// Upper bound of files listed per project, protects against huge folders on slow shares.
++const size_t SCAN_MAX_FILES = 200;
++
++
++bool readTextFile( const wxString& aFileName, std::string& aContent )
++{
++    wxLogNull noLog;
++    wxFFile   file( aFileName, wxS( "rb" ) );
++
++    if( !file.IsOpened() )
++        return false;
++
++    wxFileOffset len = file.Length();
++
++    if( len < 0 || len > 4 * 1024 * 1024 )
++        return false;
++
++    aContent.resize( static_cast<size_t>( len ) );
++
++    if( len > 0 && file.Read( aContent.data(), static_cast<size_t>( len ) ) != static_cast<size_t>( len ) )
++        return false;
++
++    return true;
++}
++
++
++bool writeTextFile( const wxString& aFileName, const std::string& aContent )
++{
++    wxLogNull  noLog;
++    wxFileName fn( aFileName );
++
++    if( !fn.DirExists() )
++        wxFileName::Mkdir( fn.GetPath(), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL );
++
++    wxFFile file( aFileName, wxS( "wb" ) );
++
++    if( !file.IsOpened() )
++        return false;
++
++    return file.Write( aContent.data(), aContent.size() ) == aContent.size() && file.Close();
++}
++
++
++void collectFiles( const wxString& aDir, int aDepth, std::vector<wxString>& aFiles )
++{
++    wxLogNull noLog;
++    wxDir     dir( aDir );
++
++    if( !dir.IsOpened() )
++        return;
++
++    wxString name;
++    bool     more = dir.GetFirst( &name, wxEmptyString, wxDIR_FILES );
++
++    while( more && aFiles.size() < SCAN_MAX_FILES )
++    {
++        // Skip lock files, autosave files and hidden files
++        if( !name.StartsWith( wxS( "~" ) ) && !name.StartsWith( wxS( "." ) )
++            && !name.StartsWith( wxS( "_autosave-" ) ) )
++        {
++            wxString ext = name.AfterLast( '.' ).Lower();
++
++            if( ext == FILEEXT::KiCadSchematicFileExtension || ext == FILEEXT::KiCadPcbFileExtension )
++                aFiles.push_back( aDir + wxFileName::GetPathSeparator() + name );
++        }
++
++        more = dir.GetNext( &name );
++    }
++
++    if( aDepth >= SCAN_MAX_DEPTH )
++        return;
++
++    std::vector<wxString> subDirs;
++    more = dir.GetFirst( &name, wxEmptyString, wxDIR_DIRS );
++
++    while( more )
++    {
++        // Skip hidden folders (.git, .history, ...) and KiCad backup folders
++        if( !name.StartsWith( wxS( "." ) ) && !name.EndsWith( wxS( "-backups" ) ) )
++            subDirs.push_back( name );
++
++        more = dir.GetNext( &name );
++    }
++
++    for( const wxString& sub : subDirs )
++    {
++        wxString subPath = aDir + wxFileName::GetPathSeparator() + sub;
++
++        // A sub folder holding its own project is a different project
++        wxDir subDir( subPath );
++
++        if( subDir.IsOpened() && subDir.HasFiles( wxString( wxS( "*." ) ) + wxString( FILEEXT::ProjectFileExtension ) ) )
++            continue;
++
++        collectFiles( subPath, aDepth + 1, aFiles );
++    }
++}
++} // namespace
++
++
++wxString WS_LOCK_INFO::Owner() const
++{
++    if( user.IsEmpty() && host.IsEmpty() )
++        return wxEmptyString;
++
++    return user + wxS( "@" ) + host;
++}
++
++
++wxString WORKSPACE::Normalize( const wxString& aProFile )
++{
++    wxFileName fn( aProFile );
++    fn.MakeAbsolute();
++    fn.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE | wxPATH_NORM_TILDE );
++    return fn.GetFullPath();
++}
++
++
++bool WORKSPACE::Contains( const wxString& aProFile ) const
++{
++    wxFileName wanted( Normalize( aProFile ) );
++
++    for( const wxString& prj : m_projects )
++    {
++        if( wxFileName( prj ).SameAs( wanted ) )
++            return true;
++    }
++
++    return false;
++}
++
++
++bool WORKSPACE::AddProject( const wxString& aProFile )
++{
++    if( aProFile.IsEmpty() || Contains( aProFile ) )
++        return false;
++
++    m_projects.push_back( Normalize( aProFile ) );
++    return true;
++}
++
++
++bool WORKSPACE::RemoveProject( const wxString& aProFile )
++{
++    wxFileName wanted( Normalize( aProFile ) );
++
++    auto it = std::find_if( m_projects.begin(), m_projects.end(),
++                            [&]( const wxString& prj )
++                            {
++                                return wxFileName( prj ).SameAs( wanted );
++                            } );
++
++    if( it == m_projects.end() )
++        return false;
++
++    m_projects.erase( it );
++    return true;
++}
++
++
++bool WORKSPACE::Load( const wxString& aFileName )
++{
++    std::string content;
++
++    if( !readTextFile( aFileName, content ) )
++        return false;
++
++    std::vector<wxString> projects;
++
++    try
++    {
++        nlohmann::json j = nlohmann::json::parse( content );
++        wxString       baseDir = wxFileName( aFileName ).GetPath();
++
++        for( const nlohmann::json& entry : j.at( "projects" ) )
++        {
++            wxString   path = wxString::FromUTF8( entry.at( "path" ).get<std::string>() );
++            wxFileName fn( path );
++
++            if( !fn.IsAbsolute() )
++                fn.MakeAbsolute( baseDir );
++
++            projects.push_back( Normalize( fn.GetFullPath() ) );
++        }
++    }
++    catch( const std::exception& )
++    {
++        return false;
++    }
++
++    m_fileName = aFileName;
++    m_projects.clear();
++
++    for( const wxString& prj : projects )
++        AddProject( prj );
++
++    return true;
++}
++
++
++bool WORKSPACE::Save() const
++{
++    if( m_fileName.IsEmpty() )
++        return false;
++
++    wxFileName wsFile( m_fileName );
++    wsFile.MakeAbsolute();
++
++    wxString baseDir = wsFile.GetPathWithSep();
++
++    nlohmann::json j;
++    j["version"] = 1;
++    j["projects"] = nlohmann::json::array();
++
++    for( const wxString& prj : m_projects )
++    {
++        wxString stored = prj;
++
++        // Store relative paths (with forward slashes) for projects below the workspace
++        // folder so that a workspace on a share works from Windows and Linux alike.
++        if( prj.StartsWith( baseDir ) )
++        {
++            stored = prj.Mid( baseDir.length() );
++            stored.Replace( wxS( "\\" ), wxS( "/" ) );
++        }
++
++        nlohmann::json entry;
++        entry["path"] = std::string( stored.utf8_str() );
++        j["projects"].push_back( entry );
++    }
++
++    return writeTextFile( wsFile.GetFullPath(), j.dump( 2 ) + "\n" );
++}
++
++
++bool WORKSPACE::SaveAs( const wxString& aFileName )
++{
++    wxString previous = m_fileName;
++    m_fileName = aFileName;
++
++    if( Save() )
++        return true;
++
++    m_fileName = previous;
++    return false;
++}
++
++
++WS_LOCK_INFO WORKSPACE::ReadLockInfo( const wxString& aFile )
++{
++    WS_LOCK_INFO info;
++
++    wxFileName fn( aFile );
++    fn.SetName( FILEEXT::LockFilePrefix + fn.GetName() );
++    fn.SetExt( fn.GetExt() + wxS( "." ) + FILEEXT::LockFileExtension );
++
++    wxString lockName = fn.GetFullPath();
++
++    if( !wxFileName::FileExists( lockName ) )
++        return info;
++
++    info.locked = true;
++
++    std::string content;
++
++    if( readTextFile( lockName, content ) )
++    {
++        try
++        {
++            nlohmann::json j = nlohmann::json::parse( content );
++
++            info.user = wxString::FromUTF8( j.value( "username", std::string() ) );
++            info.host = wxString::FromUTF8( j.value( "hostname", std::string() ) );
++            info.pid = j.value( "pid", 0L );
++            info.since = wxString::FromUTF8( j.value( "since", std::string() ) );
++            info.app = wxString::FromUTF8( j.value( "app", std::string() ) );
++        }
++        catch( const std::exception& )
++        {
++            // Partially written / synced lock file: owner unknown
++        }
++    }
++
++    // Stock KiCad lock files carry no time stamp: fall back to the lock file's own date.
++    if( info.since.IsEmpty() )
++    {
++        wxLogNull  noLog;
++        wxDateTime modified;
++
++        if( fn.GetTimes( nullptr, &modified, nullptr ) && modified.IsValid() )
++            info.since = modified.FormatISOCombined();
++    }
++
++    info.mine = !info.user.IsEmpty() && info.user == wxGetUserId() && info.host == wxGetHostName();
++
++    if( info.mine && info.pid > 0 )
++    {
++        info.thisProcess = info.pid == static_cast<long>( wxGetProcessId() );
++        info.stale = !info.thisProcess && !wxProcess::Exists( static_cast<int>( info.pid ) );
++    }
++
++    return info;
++}
++
++
++std::vector<WS_PROJECT> WORKSPACE::Scan( const std::vector<wxString>& aProjects )
++{
++    std::vector<WS_PROJECT> result;
++    result.reserve( aProjects.size() );
++
++    for( const wxString& proFile : aProjects )
++    {
++        WS_PROJECT prj;
++        prj.proFile = proFile;
++        prj.exists = wxFileName::FileExists( proFile );
++
++        if( prj.exists )
++        {
++            prj.lock = ReadLockInfo( proFile );
++
++            wxFileName            proFn( proFile );
++            std::vector<wxString> files;
++
++            collectFiles( proFn.GetPath(), 0, files );
++
++            // Root schematic and board (same base name as the project) first, then
++            // schematics before boards, then alphabetically.
++            wxString rootName = proFn.GetName();
++
++            auto rank = [&]( const wxString& aPath )
++            {
++                wxFileName fn( aPath );
++                int        r = 0;
++
++                if( fn.GetName() != rootName || fn.GetPath() != proFn.GetPath() )
++                    r += 2;
++
++                if( fn.GetExt().Lower() != FILEEXT::KiCadSchematicFileExtension )
++                    r += 1;
++
++                return r;
++            };
++
++            std::sort( files.begin(), files.end(),
++                       [&]( const wxString& a, const wxString& b )
++                       {
++                           int ra = rank( a );
++                           int rb = rank( b );
++
++                           if( ra != rb )
++                               return ra < rb;
++
++                           return a.CmpNoCase( b ) < 0;
++                       } );
++
++            for( const wxString& file : files )
++            {
++                WS_FILE f;
++                f.path = file;
++                f.lock = ReadLockInfo( file );
++                prj.files.push_back( f );
++            }
++        }
++
++        result.push_back( prj );
++    }
++
++    return result;
++}
++
++
++wxString WORKSPACE::DefaultFileName()
++{
++    wxFileName fn( PATHS::GetUserSettingsPath(), wxS( "default" ), WORKSPACE_FILE_EXT );
++    return fn.GetFullPath();
++}
++
++
++static wxString stateFileName()
++{
++    wxFileName fn( PATHS::GetUserSettingsPath(), wxS( "workspace_state" ), wxS( "json" ) );
++    return fn.GetFullPath();
++}
++
++
++wxString WORKSPACE::LoadLastUsed()
++{
++    std::string content;
++
++    if( !readTextFile( stateFileName(), content ) )
++        return wxEmptyString;
++
++    try
++    {
++        nlohmann::json j = nlohmann::json::parse( content );
++        return wxString::FromUTF8( j.value( "last_workspace", std::string() ) );
++    }
++    catch( const std::exception& )
++    {
++        return wxEmptyString;
++    }
++}
++
++
++void WORKSPACE::SaveLastUsed( const wxString& aFileName )
++{
++    nlohmann::json j;
++    j["last_workspace"] = std::string( aFileName.utf8_str() );
++    writeTextFile( stateFileName(), j.dump( 2 ) + "\n" );
++}
+diff --git a/kicad/workspace.h b/kicad/workspace.h
+new file mode 100644
+index 00000000..a6182a05
+--- /dev/null
++++ b/kicad/workspace.h
+@@ -0,0 +1,122 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork (multi-project manager with network lock overview).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef KICAD_WORKSPACE_H
++#define KICAD_WORKSPACE_H
++
++#include <vector>
++#include <wx/string.h>
++
++/// File extension of a workspace file (JSON).
++#define WORKSPACE_FILE_EXT wxS( "kicad_workspace" )
++
++/**
++ * Owner information read from a KiCad lock file (~name.ext.lck) without touching it.
++ */
++struct WS_LOCK_INFO
++{
++    bool     locked = false;   ///< a lock file exists
++    bool     mine = false;     ///< same user on this computer
++    bool     thisProcess = false; ///< held by the calling process
++    bool     stale = false;    ///< mine, but the owning process no longer exists
++    long     pid = 0;
++    wxString user;
++    wxString host;
++    wxString since;            ///< ISO date/time, may be empty (stock KiCad lock)
++    wxString app;              ///< may be empty (stock KiCad lock)
++
++    /// "user@host" or an empty string
++    wxString Owner() const;
++
++    bool operator==( const WS_LOCK_INFO& aOther ) const
++    {
++        return locked == aOther.locked && stale == aOther.stale && pid == aOther.pid
++               && user == aOther.user && host == aOther.host && since == aOther.since;
++    }
++
++    bool operator!=( const WS_LOCK_INFO& aOther ) const { return !( *this == aOther ); }
++};
++
++
++struct WS_FILE
++{
++    wxString     path;         ///< absolute path
++    WS_LOCK_INFO lock;
++};
++
++
++struct WS_PROJECT
++{
++    wxString             proFile;   ///< absolute path of the .kicad_pro file
++    bool                 exists = false;
++    WS_LOCK_INFO         lock;      ///< lock of the project file itself
++    std::vector<WS_FILE> files;     ///< schematics and boards found in the project folder
++};
++
++
++/**
++ * A list of KiCad projects that are shown together in the workspace pane.
++ *
++ * Stored as a small JSON document:
++ * { "version": 1, "projects": [ { "path": "relative/or/absolute.kicad_pro" }, ... ] }
++ * Paths are stored relative to the workspace file when the project lives below the
++ * workspace folder, absolute otherwise.
++ */
++class WORKSPACE
++{
++public:
++    bool Load( const wxString& aFileName );
++    bool Save() const;
++    bool SaveAs( const wxString& aFileName );
++
++    const wxString& GetFileName() const { return m_fileName; }
++    void SetFileName( const wxString& aFileName ) { m_fileName = aFileName; }
++
++    const std::vector<wxString>& GetProjects() const { return m_projects; }
++
++    bool Contains( const wxString& aProFile ) const;
++    bool AddProject( const wxString& aProFile );
++    bool RemoveProject( const wxString& aProFile );
++    void Clear() { m_projects.clear(); }
++
++    /// Normalize a project path so that the same project always compares equal.
++    static wxString Normalize( const wxString& aProFile );
++
++    /// Read the lock file belonging to \a aFile (does never create or modify anything).
++    static WS_LOCK_INFO ReadLockInfo( const wxString& aFile );
++
++    /**
++     * Collect files and lock states of all given projects.  Does only read from the file
++     * system and is safe to run in a worker thread.
++     */
++    static std::vector<WS_PROJECT> Scan( const std::vector<wxString>& aProjects );
++
++    /// Location of the workspace used when the user did not open or save one explicitly.
++    static wxString DefaultFileName();
++
++    /// Remember / recall the workspace that was in use when KiCad was closed.
++    static wxString LoadLastUsed();
++    static void     SaveLastUsed( const wxString& aFileName );
++
++private:
++    wxString              m_fileName;
++    std::vector<wxString> m_projects;
++};
++
++#endif // KICAD_WORKSPACE_H
+diff --git a/kicad/workspace_pane.cpp b/kicad/workspace_pane.cpp
+new file mode 100644
+index 00000000..9b1a8cf6
+--- /dev/null
++++ b/kicad/workspace_pane.cpp
+@@ -0,0 +1,1149 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork (multi-project manager with network lock overview).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "workspace_pane.h"
++
++#include <chrono>
++#include <functional>
++#include <string>
++
++#include <wx/bmpbuttn.h>
++#include <wx/dir.h>
++#include <wx/ffile.h>
++#include <wx/filedlg.h>
++#include <wx/filename.h>
++#include <wx/listbox.h>
++#include <wx/log.h>
++#include <wx/menu.h>
++#include <wx/process.h>
++#include <wx/settings.h>
++#include <wx/sizer.h>
++#include <wx/stattext.h>
++#include <wx/stdpaths.h>
++#include <wx/utils.h>
++
++#include <bitmaps.h>
++#include <confirm.h>
++#include <launch_ext.h>
++#include <notifications_manager.h>
++#include <pgm_base.h>
++#include <project.h>
++#include <tool/tool_manager.h>
++#include <wildcards_and_files_ext.h>
++
++#include "kicad_manager_frame.h"
++#include "tools/kicad_manager_actions.h"
++
++
++/// Seconds between two scans of the workspace projects.
++static const int SCAN_INTERVAL_S = 5;
++
++/// Maximum number of lines kept in the activity list.
++static const unsigned ACTIVITY_MAX_LINES = 200;
++
++enum WS_ICON
++{
++    WS_ICON_WORKSPACE = 0,
++    WS_ICON_PROJECT,
++    WS_ICON_SCHEMATIC,
++    WS_ICON_PCB,
++    WS_ICON_MISSING
++};
++
++
++/// Data attached to every tree item.
++class WS_ITEM_DATA : public wxTreeItemData
++{
++public:
++    WS_ITEM_DATA( const wxString& aProFile, const wxString& aFile ) :
++            m_proFile( aProFile ),
++            m_file( aFile )
++    {
++    }
++
++    bool IsProject() const { return m_file.IsEmpty(); }
++
++    wxString m_proFile;
++    wxString m_file;      ///< empty for a project node
++};
++
++
++/// Notifies the pane when a helper process ends.
++class WS_CHILD_PROCESS : public wxProcess
++{
++public:
++    WS_CHILD_PROCESS( WORKSPACE_PANE* aPane, const wxString& aProFile ) :
++            wxProcess( wxPROCESS_DEFAULT ),
++            m_pane( aPane ),
++            m_proFile( aProFile )
++    {
++    }
++
++    void OnTerminate( int aPid, int aStatus ) override
++    {
++        if( m_pane )
++            m_pane->OnChildTerminated( m_proFile );
++
++        delete this;
++    }
++
++    /// The pane is going away: the process keeps running, nobody is notified anymore.
++    void Orphan() { m_pane = nullptr; }
++
++private:
++    WORKSPACE_PANE* m_pane;
++    wxString        m_proFile;
++};
++
++
++WORKSPACE_PANE::WORKSPACE_PANE( KICAD_MANAGER_FRAME* aParent ) :
++        wxPanel( aParent, wxID_ANY ),
++        m_frame( aParent ),
++        m_title( nullptr ),
++        m_tree( nullptr ),
++        m_activity( nullptr ),
++        m_timer( this ),
++        m_scanRequested( true ),
++        m_firstScanDone( false ),
++        m_ticksSinceScan( 0 ),
++        m_childCounter( 0 )
++{
++    buildUi();
++    loadInitialWorkspace();
++
++    Bind( wxEVT_TIMER, &WORKSPACE_PANE::onTimer, this, m_timer.GetId() );
++    m_timer.Start( 1000 );
++}
++
++
++WORKSPACE_PANE::~WORKSPACE_PANE()
++{
++    m_timer.Stop();
++
++    for( auto& [proFile, child] : m_children )
++    {
++        if( child.process )
++            child.process->Orphan();
++    }
++
++    // Wait for a running scan; it only reads a few small files.
++    if( m_scan.valid() )
++        m_scan.wait();
++}
++
++
++void WORKSPACE_PANE::buildUi()
++{
++    wxBoxSizer* mainSizer = new wxBoxSizer( wxVERTICAL );
++    wxBoxSizer* barSizer = new wxBoxSizer( wxHORIZONTAL );
++
++    m_title = new wxStaticText( this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
++                                wxST_ELLIPSIZE_END );
++    barSizer->Add( m_title, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, 4 );
++
++    auto addButton = [&]( BITMAPS aBitmap, const wxString& aTip, std::function<void()> aHandler )
++    {
++        wxBitmapButton* btn = new wxBitmapButton( this, wxID_ANY, KiBitmapBundle( aBitmap ),
++                                                  wxDefaultPosition, wxDefaultSize,
++                                                  wxBU_AUTODRAW | wxBORDER_NONE );
++        btn->SetToolTip( aTip );
++        btn->Bind( wxEVT_BUTTON,
++                   [aHandler]( wxCommandEvent& )
++                   {
++                       aHandler();
++                   } );
++        barSizer->Add( btn, 0, wxALIGN_CENTER_VERTICAL | wxALL, 1 );
++    };
++
++    addButton( BITMAPS::small_plus, _( "Add project to workspace..." ),
++               [this]()
++               {
++                   AddProjectDialog();
++               } );
++
++    addButton( BITMAPS::small_trash, _( "Remove selected project from workspace" ),
++               [this]()
++               {
++                   wxTreeItemId sel = m_tree->GetSelection();
++
++                   if( sel.IsOk() )
++                   {
++                       if( WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( sel ) ) )
++                           removeProject( data->m_proFile );
++                   }
++               } );
++
++    addButton( BITMAPS::small_refresh, _( "Refresh files and lock states now" ),
++               [this]()
++               {
++                   RequestScan();
++               } );
++
++    mainSizer->Add( barSizer, 0, wxEXPAND | wxTOP | wxBOTTOM, 2 );
++
++    m_tree = new wxTreeCtrl( this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
++                             wxTR_HAS_BUTTONS | wxTR_SINGLE | wxTR_HIDE_ROOT | wxTR_LINES_AT_ROOT
++                                     | wxTR_NO_LINES | wxBORDER_NONE );
++
++    wxVector<wxBitmapBundle> images;
++    images.push_back( KiBitmapBundleDef( BITMAPS::directory, 22 ) );        // WS_ICON_WORKSPACE
++    images.push_back( KiBitmapBundleDef( BITMAPS::project_kicad, 22 ) );    // WS_ICON_PROJECT
++    images.push_back( KiBitmapBundleDef( BITMAPS::icon_eeschema_24, 22 ) ); // WS_ICON_SCHEMATIC
++    images.push_back( KiBitmapBundleDef( BITMAPS::icon_pcbnew_24, 22 ) );   // WS_ICON_PCB
++    images.push_back( KiBitmapBundleDef( BITMAPS::unknown, 22 ) );          // WS_ICON_MISSING
++    m_tree->SetImages( images );
++
++    mainSizer->Add( m_tree, 3, wxEXPAND );
++
++    m_activity = new wxListBox( this, wxID_ANY, wxDefaultPosition, wxSize( -1, FromDIP( 70 ) ), 0,
++                                nullptr, wxLB_SINGLE | wxLB_HSCROLL | wxBORDER_NONE );
++    m_activity->SetToolTip( _( "Activity of other users in the workspace projects" ) );
++    mainSizer->Add( m_activity, 1, wxEXPAND | wxTOP, 2 );
++
++    SetSizer( mainSizer );
++
++    m_tree->Bind( wxEVT_TREE_ITEM_ACTIVATED, &WORKSPACE_PANE::onItemActivated, this );
++    m_tree->Bind( wxEVT_TREE_ITEM_MENU, &WORKSPACE_PANE::onItemMenu, this );
++    m_tree->Bind( wxEVT_TREE_ITEM_GETTOOLTIP, &WORKSPACE_PANE::onItemTooltip, this );
++
++    m_tree->Bind( wxEVT_TREE_ITEM_COLLAPSED,
++                  [this]( wxTreeEvent& aEvent )
++                  {
++                      if( WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( aEvent.GetItem() ) ) )
++                          m_collapsed.insert( data->m_proFile );
++                  } );
++
++    m_tree->Bind( wxEVT_TREE_ITEM_EXPANDED,
++                  [this]( wxTreeEvent& aEvent )
++                  {
++                      if( WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( aEvent.GetItem() ) ) )
++                          m_collapsed.erase( data->m_proFile );
++                  } );
++}
++
++
++void WORKSPACE_PANE::ShowChangedLanguage()
++{
++    updateCaption();
++    updateLabels();
++}
++
++
++void WORKSPACE_PANE::loadInitialWorkspace()
++{
++    wxString last = WORKSPACE::LoadLastUsed();
++
++    if( last.IsEmpty() || !m_workspace.Load( last ) )
++    {
++        wxString def = WORKSPACE::DefaultFileName();
++
++        if( !m_workspace.Load( def ) )
++            m_workspace.SetFileName( def );
++    }
++
++    updateCaption();
++}
++
++
++void WORKSPACE_PANE::updateCaption()
++{
++    wxFileName fn( m_workspace.GetFileName() );
++    wxString   name;
++
++    if( wxFileName( WORKSPACE::DefaultFileName() ).SameAs( fn ) )
++        name = _( "Default workspace" );
++    else
++        name = fn.GetName();
++
++    m_title->SetLabel( wxString::Format( _( "%s (%d projects)" ), name,
++                                         (int) m_workspace.GetProjects().size() ) );
++    m_title->SetToolTip( fn.GetFullPath() );
++}
++
++
++void WORKSPACE_PANE::workspaceChanged( bool aSave )
++{
++    if( aSave && !m_workspace.Save() )
++    {
++        DisplayErrorMessage( m_frame, wxString::Format( _( "Could not write workspace file '%s'." ),
++                                                        m_workspace.GetFileName() ) );
++    }
++
++    WORKSPACE::SaveLastUsed( m_workspace.GetFileName() );
++    updateCaption();
++
++    // Show added / removed projects immediately; files and locks follow with the next scan.
++    std::vector<WS_PROJECT> snapshot;
++
++    for( const wxString& proFile : m_workspace.GetProjects() )
++    {
++        if( const WS_PROJECT* known = findProject( proFile ) )
++        {
++            snapshot.push_back( *known );
++        }
++        else
++        {
++            WS_PROJECT prj;
++            prj.proFile = proFile;
++            prj.exists = true;
++            snapshot.push_back( prj );
++        }
++    }
++
++    m_snapshot = std::move( snapshot );
++    rebuildTree();
++    RequestScan();
++}
++
++
++void WORKSPACE_PANE::NewWorkspace()
++{
++    wxFileDialog dlg( m_frame, _( "Create New Workspace" ), wxEmptyString, wxEmptyString,
++                      _( "KiCad workspace files" ) + wxS( " (*.kicad_workspace)|*.kicad_workspace" ),
++                      wxFD_SAVE | wxFD_OVERWRITE_PROMPT );
++
++    if( dlg.ShowModal() == wxID_CANCEL )
++        return;
++
++    wxFileName fn( dlg.GetPath() );
++    fn.SetExt( WORKSPACE_FILE_EXT );
++
++    m_workspace.Clear();
++    m_workspace.SetFileName( fn.GetFullPath() );
++    m_snapshot.clear();
++    workspaceChanged( true );
++}
++
++
++void WORKSPACE_PANE::OpenWorkspace()
++{
++    wxFileDialog dlg( m_frame, _( "Open Workspace" ), wxEmptyString, wxEmptyString,
++                      _( "KiCad workspace files" ) + wxS( " (*.kicad_workspace)|*.kicad_workspace" ),
++                      wxFD_OPEN | wxFD_FILE_MUST_EXIST );
++
++    if( dlg.ShowModal() == wxID_CANCEL )
++        return;
++
++    WORKSPACE loaded;
++
++    if( !loaded.Load( dlg.GetPath() ) )
++    {
++        DisplayErrorMessage( m_frame, wxString::Format( _( "'%s' is not a valid workspace file." ),
++                                                        dlg.GetPath() ) );
++        return;
++    }
++
++    m_workspace = loaded;
++    m_snapshot.clear();
++    workspaceChanged( false );
++}
++
++
++void WORKSPACE_PANE::SaveWorkspaceAs()
++{
++    wxFileName current( m_workspace.GetFileName() );
++
++    wxFileDialog dlg( m_frame, _( "Save Workspace As" ), wxEmptyString, current.GetFullName(),
++                      _( "KiCad workspace files" ) + wxS( " (*.kicad_workspace)|*.kicad_workspace" ),
++                      wxFD_SAVE | wxFD_OVERWRITE_PROMPT );
++
++    if( dlg.ShowModal() == wxID_CANCEL )
++        return;
++
++    wxFileName fn( dlg.GetPath() );
++    fn.SetExt( WORKSPACE_FILE_EXT );
++
++    if( !m_workspace.SaveAs( fn.GetFullPath() ) )
++    {
++        DisplayErrorMessage( m_frame, wxString::Format( _( "Could not write workspace file '%s'." ),
++                                                        fn.GetFullPath() ) );
++        return;
++    }
++
++    workspaceChanged( false );
++}
++
++
++void WORKSPACE_PANE::AddProjectDialog()
++{
++    wxFileDialog dlg( m_frame, _( "Add Projects to Workspace" ), wxEmptyString, wxEmptyString,
++                      FILEEXT::ProjectFileWildcard(),
++                      wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE );
++
++    if( dlg.ShowModal() == wxID_CANCEL )
++        return;
++
++    wxArrayString paths;
++    dlg.GetPaths( paths );
++
++    bool changed = false;
++
++    for( const wxString& path : paths )
++    {
++        if( wxFileName( path ).GetExt() == FILEEXT::ProjectFileExtension )
++            changed |= m_workspace.AddProject( path );
++    }
++
++    if( changed )
++        workspaceChanged( true );
++}
++
++
++void WORKSPACE_PANE::AddActiveProject()
++{
++    if( Prj().IsNullProject() || Prj().GetProjectFullName().IsEmpty() )
++    {
++        DisplayInfoMessage( m_frame, _( "There is no active project that could be added." ) );
++        return;
++    }
++
++    if( m_workspace.AddProject( Prj().GetProjectFullName() ) )
++        workspaceChanged( true );
++}
++
++
++void WORKSPACE_PANE::OnProjectLoaded( const wxString& aProFile )
++{
++    // Like in Altium Designer every project that gets opened stays listed in the workspace
++    // until the user removes it.
++    if( !aProFile.IsEmpty() && wxFileName( aProFile ).GetExt() == FILEEXT::ProjectFileExtension
++        && m_workspace.AddProject( aProFile ) )
++    {
++        workspaceChanged( true );
++    }
++    else
++    {
++        ActiveProjectChanged();
++    }
++}
++
++
++void WORKSPACE_PANE::ActiveProjectChanged()
++{
++    updateLabels();
++    RequestScan();
++}
++
++
++void WORKSPACE_PANE::removeProject( const wxString& aProFile )
++{
++    if( HasRunningChild( aProFile ) )
++    {
++        DisplayInfoMessage( m_frame, _( "This project is still open in an editor. Close its editors "
++                                        "before removing it from the workspace." ) );
++        return;
++    }
++
++    if( m_workspace.RemoveProject( aProFile ) )
++        workspaceChanged( true );
++}
++
++
++bool WORKSPACE_PANE::isActiveProject( const wxString& aProFile ) const
++{
++    if( Prj().IsNullProject() )
++        return false;
++
++    wxString active = Prj().GetProjectFullName();
++
++    return !active.IsEmpty() && wxFileName( active ).SameAs( wxFileName( aProFile ) );
++}
++
++
++const WS_PROJECT* WORKSPACE_PANE::findProject( const wxString& aProFile ) const
++{
++    for( const WS_PROJECT& prj : m_snapshot )
++    {
++        if( prj.proFile == aProFile )
++            return &prj;
++    }
++
++    return nullptr;
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Scanning
++// ---------------------------------------------------------------------------------------------
++
++void WORKSPACE_PANE::onTimer( wxTimerEvent& aEvent )
++{
++    if( m_scan.valid() )
++    {
++        if( m_scan.wait_for( std::chrono::seconds( 0 ) ) != std::future_status::ready )
++            return;
++
++        std::vector<WS_PROJECT> snapshot = m_scan.get();
++
++        // Drop the result if the project list changed while the scan was running
++        if( m_scanProjects == m_workspace.GetProjects() )
++            applySnapshot( std::move( snapshot ) );
++        else
++            m_scanRequested = true;
++    }
++
++    m_ticksSinceScan++;
++
++    if( m_scanRequested || m_ticksSinceScan >= SCAN_INTERVAL_S )
++        startScan();
++}
++
++
++void WORKSPACE_PANE::startScan()
++{
++    m_scanRequested = false;
++    m_ticksSinceScan = 0;
++    m_scanProjects = m_workspace.GetProjects();
++
++    std::vector<wxString> projects = m_scanProjects;
++
++    m_scan = std::async( std::launch::async,
++                         [projects]()
++                         {
++                             return WORKSPACE::Scan( projects );
++                         } );
++}
++
++
++void WORKSPACE_PANE::applySnapshot( std::vector<WS_PROJECT>&& aSnapshot )
++{
++    auto collectLocks = []( const std::vector<WS_PROJECT>& aProjects )
++    {
++        std::map<wxString, WS_LOCK_INFO> locks;
++
++        for( const WS_PROJECT& prj : aProjects )
++        {
++            if( prj.lock.locked )
++                locks[prj.proFile] = prj.lock;
++
++            for( const WS_FILE& file : prj.files )
++            {
++                if( file.lock.locked )
++                    locks[file.path] = file.lock;
++            }
++        }
++
++        return locks;
++    };
++
++    std::map<wxString, WS_LOCK_INFO> oldLocks = collectLocks( m_snapshot );
++    std::map<wxString, WS_LOCK_INFO> newLocks = collectLocks( aSnapshot );
++
++    m_snapshot = std::move( aSnapshot );
++
++    wxString signature;
++
++    for( const WS_PROJECT& prj : m_snapshot )
++    {
++        signature << prj.proFile << ( prj.exists ? wxS( "|1\n" ) : wxS( "|0\n" ) );
++
++        for( const WS_FILE& file : prj.files )
++            signature << wxS( " " ) << file.path << wxS( "\n" );
++    }
++
++    if( signature != m_treeSignature )
++        rebuildTree();
++    else
++        updateLabels();
++
++    if( m_firstScanDone )
++        reportLockChanges( oldLocks, newLocks );
++    else
++        reportLockChanges( {}, newLocks );
++
++    m_firstScanDone = true;
++}
++
++
++void WORKSPACE_PANE::reportLockChanges( const std::map<wxString, WS_LOCK_INFO>& aOld,
++                                        const std::map<wxString, WS_LOCK_INFO>& aNew )
++{
++    auto who = []( const WS_LOCK_INFO& aLock )
++    {
++        return aLock.Owner().IsEmpty() ? _( "Unknown user" ) : aLock.Owner();
++    };
++
++    wxString lastMessage;
++    int      count = 0;
++
++    for( const auto& [path, lock] : aNew )
++    {
++        if( lock.mine )
++            continue;
++
++        auto     it = aOld.find( path );
++        wxString name = wxFileName( path ).GetFullName();
++
++        if( it == aOld.end() )
++        {
++            lastMessage = wxString::Format( _( "%s opened %s" ), who( lock ), name );
++        }
++        else if( it->second.Owner() != lock.Owner() )
++        {
++            lastMessage = wxString::Format( _( "%s took over %s (was held by %s)" ), who( lock ), name,
++                                            who( it->second ) );
++        }
++        else
++        {
++            continue;
++        }
++
++        addActivity( lastMessage );
++        count++;
++    }
++
++    for( const auto& [path, lock] : aOld )
++    {
++        if( aNew.count( path ) )
++            continue;
++
++        if( lock.mine )
++            continue;
++
++        lastMessage = wxString::Format( _( "%s closed %s" ), who( lock ), wxFileName( path ).GetFullName() );
++        addActivity( lastMessage );
++        count++;
++    }
++
++    // A lock of ours that somebody else replaced is reported above as "took over"; the
++    // notification bell makes sure it does not go unnoticed.
++    if( count > 0 )
++    {
++        Pgm().GetNotificationsManager().CreateOrUpdate( wxS( "workspace-activity" ), _( "Workspace activity" ),
++                                                        lastMessage );
++    }
++}
++
++
++void WORKSPACE_PANE::addActivity( const wxString& aText )
++{
++    wxString line = wxDateTime::Now().Format( wxS( "%H:%M" ) ) + wxS( "  " ) + aText;
++
++    m_activity->Insert( line, 0 );
++
++    while( m_activity->GetCount() > ACTIVITY_MAX_LINES )
++        m_activity->Delete( m_activity->GetCount() - 1 );
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Tree
++// ---------------------------------------------------------------------------------------------
++
++wxString WORKSPACE_PANE::lockSuffix( const WS_LOCK_INFO& aLock ) const
++{
++    if( !aLock.locked )
++        return wxEmptyString;
++
++    if( aLock.stale )
++        return wxS( "  —  " ) + _( "stale lock (crashed session)" );
++
++    if( aLock.mine )
++        return wxS( "  —  " ) + _( "open on this computer" );
++
++    wxString owner = aLock.Owner().IsEmpty() ? _( "Unknown user" ) : aLock.Owner();
++    wxString since;
++
++    // "2026-11-11T09:41:07" -> "11.11. 09:41" would need locale handling; keep date + time short
++    if( aLock.since.length() >= 16 )
++    {
++        wxString today = wxDateTime::Now().FormatISODate();
++
++        if( aLock.since.StartsWith( today ) )
++            since = aLock.since.Mid( 11, 5 );
++        else
++            since = aLock.since.Left( 10 ) + wxS( " " ) + aLock.since.Mid( 11, 5 );
++    }
++
++    if( since.IsEmpty() )
++        return wxS( "  —  " ) + wxString::Format( _( "in use by %s" ), owner );
++
++    return wxS( "  —  " ) + wxString::Format( _( "in use by %s since %s" ), owner, since );
++}
++
++
++wxColour WORKSPACE_PANE::lockColour( const WS_LOCK_INFO& aLock ) const
++{
++    if( !aLock.locked )
++        return wxNullColour;
++
++    bool dark = wxSystemSettings::GetAppearance().IsDark();
++
++    if( aLock.stale )
++        return dark ? wxColour( 255, 170, 60 ) : wxColour( 190, 100, 0 );
++
++    if( aLock.mine )
++        return dark ? wxColour( 110, 210, 130 ) : wxColour( 0, 120, 50 );
++
++    return dark ? wxColour( 255, 110, 110 ) : wxColour( 195, 30, 30 );
++}
++
++
++wxString WORKSPACE_PANE::lockTooltip( const wxString& aPath, const WS_LOCK_INFO& aLock ) const
++{
++    wxString tip = aPath;
++
++    if( !aLock.locked )
++        return tip + wxS( "\n" ) + _( "Not open anywhere." );
++
++    wxString since = aLock.since;
++    since.Replace( wxS( "T" ), wxS( " " ) );
++
++    tip << wxS( "\n" ) << _( "User:" ) << wxS( " " ) << ( aLock.user.IsEmpty() ? _( "unknown" ) : aLock.user );
++    tip << wxS( "\n" ) << _( "Computer:" ) << wxS( " " ) << ( aLock.host.IsEmpty() ? _( "unknown" ) : aLock.host );
++
++    if( !since.IsEmpty() )
++        tip << wxS( "\n" ) << _( "Since:" ) << wxS( " " ) << since;
++
++    if( !aLock.app.IsEmpty() )
++        tip << wxS( "\n" ) << _( "Application:" ) << wxS( " " ) << aLock.app;
++
++    if( aLock.pid > 0 )
++        tip << wxS( "\n" ) << wxS( "PID: " ) << aLock.pid;
++
++    if( aLock.stale )
++    {
++        tip << wxS( "\n" ) << _( "The process that created this lock no longer exists. The lock is "
++                                 "removed automatically when the file is opened." );
++    }
++
++    return tip;
++}
++
++
++wxString WORKSPACE_PANE::projectLabel( const WS_PROJECT& aProject ) const
++{
++    wxString label = wxFileName( aProject.proFile ).GetName();
++
++    if( !aProject.exists )
++        return label + wxS( "  —  " ) + _( "not found" );
++
++    if( isActiveProject( aProject.proFile ) )
++        label += wxS( "  [" ) + _( "active" ) + wxS( "]" );
++    else if( HasRunningChild( aProject.proFile ) )
++        label += wxS( "  [" ) + _( "open" ) + wxS( "]" );
++
++    // Our own project lock is implied by [active] / [open]; only mention foreign or stale ones.
++    if( aProject.lock.locked && ( !aProject.lock.mine || aProject.lock.stale ) )
++        label += lockSuffix( aProject.lock );
++
++    return label;
++}
++
++
++wxString WORKSPACE_PANE::fileLabel( const WS_PROJECT& aProject, const WS_FILE& aFile ) const
++{
++    wxFileName fn( aFile.path );
++    fn.MakeRelativeTo( wxFileName( aProject.proFile ).GetPath() );
++
++    return fn.GetFullPath() + lockSuffix( aFile.lock );
++}
++
++
++void WORKSPACE_PANE::rebuildTree()
++{
++    wxString selected;
++
++    if( m_tree->GetSelection().IsOk() )
++    {
++        if( WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( m_tree->GetSelection() ) ) )
++            selected = data->IsProject() ? data->m_proFile : data->m_file;
++    }
++
++    // Collapse / expand events fired while rebuilding must not alter the remembered state
++    std::set<wxString> collapsed = m_collapsed;
++
++    m_tree->Freeze();
++    m_tree->DeleteAllItems();
++    m_projectItems.clear();
++    m_fileItems.clear();
++
++    wxTreeItemId root = m_tree->AddRoot( wxS( "workspace" ), WS_ICON_WORKSPACE );
++    wxString     signature;
++
++    for( const WS_PROJECT& prj : m_snapshot )
++    {
++        signature << prj.proFile << ( prj.exists ? wxS( "|1\n" ) : wxS( "|0\n" ) );
++
++        wxTreeItemId prjItem = m_tree->AppendItem( root, wxEmptyString,
++                                                   prj.exists ? WS_ICON_PROJECT : WS_ICON_MISSING, -1,
++                                                   new WS_ITEM_DATA( prj.proFile, wxEmptyString ) );
++        m_projectItems[prj.proFile] = prjItem;
++
++        for( const WS_FILE& file : prj.files )
++        {
++            signature << wxS( " " ) << file.path << wxS( "\n" );
++
++            bool isSch = wxFileName( file.path ).GetExt().Lower() == FILEEXT::KiCadSchematicFileExtension;
++
++            wxTreeItemId fileItem = m_tree->AppendItem( prjItem, wxEmptyString,
++                                                        isSch ? WS_ICON_SCHEMATIC : WS_ICON_PCB, -1,
++                                                        new WS_ITEM_DATA( prj.proFile, file.path ) );
++            m_fileItems[file.path] = fileItem;
++        }
++    }
++
++    m_treeSignature = signature;
++    updateLabels();
++
++    for( const auto& [proFile, item] : m_projectItems )
++    {
++        if( !collapsed.count( proFile ) )
++            m_tree->Expand( item );
++    }
++
++    m_collapsed = collapsed;
++
++    if( !selected.IsEmpty() )
++    {
++        if( m_fileItems.count( selected ) )
++            m_tree->SelectItem( m_fileItems[selected] );
++        else if( m_projectItems.count( selected ) )
++            m_tree->SelectItem( m_projectItems[selected] );
++    }
++
++    m_tree->Thaw();
++}
++
++
++void WORKSPACE_PANE::updateLabels()
++{
++    for( const WS_PROJECT& prj : m_snapshot )
++    {
++        auto prjIt = m_projectItems.find( prj.proFile );
++
++        if( prjIt == m_projectItems.end() )
++            continue;
++
++        wxString label = projectLabel( prj );
++
++        if( m_tree->GetItemText( prjIt->second ) != label )
++            m_tree->SetItemText( prjIt->second, label );
++
++        m_tree->SetItemBold( prjIt->second, isActiveProject( prj.proFile ) );
++
++        if( !prj.exists )
++            m_tree->SetItemTextColour( prjIt->second, wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT ) );
++        else if( prj.lock.locked && ( !prj.lock.mine || prj.lock.stale ) )
++            m_tree->SetItemTextColour( prjIt->second, lockColour( prj.lock ) );
++        else
++            m_tree->SetItemTextColour( prjIt->second, wxNullColour );
++
++        for( const WS_FILE& file : prj.files )
++        {
++            auto fileIt = m_fileItems.find( file.path );
++
++            if( fileIt == m_fileItems.end() )
++                continue;
++
++            wxString fileText = fileLabel( prj, file );
++
++            if( m_tree->GetItemText( fileIt->second ) != fileText )
++                m_tree->SetItemText( fileIt->second, fileText );
++
++            m_tree->SetItemTextColour( fileIt->second, lockColour( file.lock ) );
++        }
++    }
++}
++
++
++void WORKSPACE_PANE::onItemTooltip( wxTreeEvent& aEvent )
++{
++    WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( aEvent.GetItem() ) );
++
++    if( !data )
++        return;
++
++    const WS_PROJECT* prj = findProject( data->m_proFile );
++
++    if( !prj )
++        return;
++
++    if( data->IsProject() )
++    {
++        aEvent.SetToolTip( lockTooltip( prj->proFile, prj->lock ) );
++        return;
++    }
++
++    for( const WS_FILE& file : prj->files )
++    {
++        if( file.path == data->m_file )
++        {
++            aEvent.SetToolTip( lockTooltip( file.path, file.lock ) );
++            return;
++        }
++    }
++}
++
++
++void WORKSPACE_PANE::onItemActivated( wxTreeEvent& aEvent )
++{
++    WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( aEvent.GetItem() ) );
++
++    if( !data )
++        return;
++
++    if( data->IsProject() )
++    {
++        m_tree->Toggle( aEvent.GetItem() );
++        return;
++    }
++
++    bool isSch = wxFileName( data->m_file ).GetExt().Lower() == FILEEXT::KiCadSchematicFileExtension;
++
++    openInProject( data->m_proFile, isSch ? OPEN_WHAT::SCHEMATIC : OPEN_WHAT::PCB );
++}
++
++
++void WORKSPACE_PANE::onItemMenu( wxTreeEvent& aEvent )
++{
++    WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( aEvent.GetItem() ) );
++
++    if( !data )
++        return;
++
++    m_tree->SelectItem( aEvent.GetItem() );
++
++    // Copy: the item (and its data) may be deleted by a rescan while the menu is open
++    wxString proFile = data->m_proFile;
++    wxString file = data->m_file;
++    bool     exists = findProject( proFile ) && findProject( proFile )->exists;
++
++    wxMenu menu;
++
++    auto add = [&]( const wxString& aLabel, bool aEnable, std::function<void()> aHandler )
++    {
++        wxMenuItem* item = menu.Append( wxID_ANY, aLabel );
++        item->Enable( aEnable );
++        menu.Bind( wxEVT_MENU,
++                   [aHandler]( wxCommandEvent& )
++                   {
++                       aHandler();
++                   },
++                   item->GetId() );
++    };
++
++    add( _( "Open Schematic Editor" ), exists,
++         [this, proFile]()
++         {
++             openInProject( proFile, OPEN_WHAT::SCHEMATIC );
++         } );
++
++    add( _( "Open PCB Editor" ), exists,
++         [this, proFile]()
++         {
++             openInProject( proFile, OPEN_WHAT::PCB );
++         } );
++
++    menu.AppendSeparator();
++
++    add( _( "Make Active Project of This Window" ), exists && !isActiveProject( proFile ),
++         [this, proFile]()
++         {
++             setActiveProject( proFile );
++         } );
++
++    add( _( "Open Project Folder" ), exists,
++         [proFile]()
++         {
++             LaunchExternal( wxFileName( proFile ).GetPath() );
++         } );
++
++    menu.AppendSeparator();
++
++    add( _( "Remove Project from Workspace" ), true,
++         [this, proFile]()
++         {
++             removeProject( proFile );
++         } );
++
++    add( _( "Refresh" ), true,
++         [this]()
++         {
++             RequestScan();
++         } );
++
++    PopupMenu( &menu );
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Opening editors
++// ---------------------------------------------------------------------------------------------
++
++bool WORKSPACE_PANE::HasRunningChild( const wxString& aProFile ) const
++{
++    return m_children.count( aProFile ) > 0;
++}
++
++
++void WORKSPACE_PANE::OnChildTerminated( const wxString& aProFile )
++{
++    auto it = m_children.find( aProFile );
++
++    if( it != m_children.end() )
++    {
++        // Remove the (normally empty) command folder
++        wxLogNull noLog;
++        wxString  cmdDir = it->second.cmdDir;
++
++        if( wxDir::Exists( cmdDir ) )
++            wxFileName::Rmdir( cmdDir, wxPATH_RMDIR_RECURSIVE );
++
++        m_children.erase( it );
++    }
++
++    updateLabels();
++    RequestScan();
++}
++
++
++void WORKSPACE_PANE::CloseChildren()
++{
++    for( auto& [proFile, child] : m_children )
++        sendCommand( child, wxS( "quit" ) );
++}
++
++
++void WORKSPACE_PANE::setActiveProject( const wxString& aProFile )
++{
++    if( HasRunningChild( aProFile ) )
++    {
++        DisplayInfoMessage( m_frame, _( "This project is open in its own editor windows. Close them "
++                                        "first to make it the active project of this window." ) );
++        return;
++    }
++
++    m_frame->LoadProject( wxFileName( aProFile ) );
++}
++
++
++void WORKSPACE_PANE::openInProject( const wxString& aProFile, OPEN_WHAT aWhat )
++{
++    if( !wxFileName::FileExists( aProFile ) )
++    {
++        DisplayErrorMessage( m_frame, wxString::Format( _( "Project file '%s' not found." ), aProFile ) );
++        return;
++    }
++
++    // The active project of this window is edited in-process, exactly like in stock KiCad.
++    if( isActiveProject( aProFile ) )
++    {
++        m_frame->GetToolManager()->RunAction( aWhat == OPEN_WHAT::SCHEMATIC ? KICAD_MANAGER_ACTIONS::editSchematic
++                                                                             : KICAD_MANAGER_ACTIONS::editPCB );
++        RequestScan();
++        return;
++    }
++
++    auto it = m_children.find( aProFile );
++
++    if( it != m_children.end() )
++    {
++        sendCommand( it->second, aWhat == OPEN_WHAT::SCHEMATIC ? wxS( "sch" ) : wxS( "pcb" ) );
++        return;
++    }
++
++    if( launchChild( aProFile, aWhat ) )
++    {
++        m_frame->SetStatusText( wxString::Format( _( "Opening project '%s'..." ),
++                                                  wxFileName( aProFile ).GetName() ), 0 );
++        updateLabels();
++    }
++}
++
++
++bool WORKSPACE_PANE::launchChild( const wxString& aProFile, OPEN_WHAT aWhat )
++{
++    wxString cmdDir = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
++                      + wxString::Format( wxS( "kicad-ws-%lu-%d" ), wxGetProcessId(), ++m_childCounter );
++
++    {
++        wxLogNull noLog;
++
++        if( wxDir::Exists( cmdDir ) )
++            wxFileName::Rmdir( cmdDir, wxPATH_RMDIR_RECURSIVE );
++
++        if( !wxFileName::Mkdir( cmdDir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) )
++        {
++            DisplayErrorMessage( m_frame, wxString::Format( _( "Could not create folder '%s'." ), cmdDir ) );
++            return false;
++        }
++    }
++
++    std::vector<wxString> args;
++    args.push_back( wxStandardPaths::Get().GetExecutablePath() );
++    args.push_back( wxS( "--ws-child=" ) + cmdDir );
++    args.push_back( aWhat == OPEN_WHAT::SCHEMATIC ? wxS( "--ws-open=sch" ) : wxS( "--ws-open=pcb" ) );
++    args.push_back( aProFile );
++
++    // Keep stable wide copies alive for the duration of the call
++    std::vector<std::wstring> wideArgs;
++
++    for( const wxString& arg : args )
++        wideArgs.push_back( arg.ToStdWstring() );
++
++    std::vector<const wchar_t*> argv;
++
++    for( const std::wstring& arg : wideArgs )
++        argv.push_back( arg.c_str() );
++
++    argv.push_back( nullptr );
++
++    WS_CHILD_PROCESS* process = new WS_CHILD_PROCESS( this, aProFile );
++    long              pid = wxExecute( argv.data(), wxEXEC_ASYNC, process );
++
++    if( pid <= 0 )
++    {
++        delete process;
++        DisplayErrorMessage( m_frame, _( "Could not start the editor process." ) );
++        return false;
++    }
++
++    CHILD child;
++    child.pid = pid;
++    child.cmdDir = cmdDir;
++    child.process = process;
++    m_children[aProFile] = child;
++
++    return true;
++}
++
++
++bool WORKSPACE_PANE::sendCommand( CHILD& aChild, const wxString& aCommand )
++{
++    wxLogNull noLog;
++
++    // Write to a temporary name first and rename: the helper process only ever sees
++    // complete command files.
++    wxString base = aChild.cmdDir + wxFileName::GetPathSeparator()
++                    + wxString::Format( wxS( "%06d" ), ++aChild.seq );
++
++    {
++        wxFFile file( base + wxS( ".tmp" ), wxS( "wb" ) );
++
++        if( !file.IsOpened() )
++            return false;
++
++        std::string text( aCommand.utf8_str() );
++        file.Write( text.data(), text.size() );
++        file.Close();
++    }
++
++    return wxRenameFile( base + wxS( ".tmp" ), base + wxS( ".cmd" ), true );
++}
+diff --git a/kicad/workspace_pane.h b/kicad/workspace_pane.h
+new file mode 100644
+index 00000000..b32f66a2
+--- /dev/null
++++ b/kicad/workspace_pane.h
+@@ -0,0 +1,151 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork (multi-project manager with network lock overview).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef KICAD_WORKSPACE_PANE_H
++#define KICAD_WORKSPACE_PANE_H
++
++#include <future>
++#include <map>
++#include <set>
++#include <vector>
++
++#include <wx/panel.h>
++#include <wx/timer.h>
++#include <wx/treectrl.h>
++
++#include "workspace.h"
++
++class KICAD_MANAGER_FRAME;
++class WS_CHILD_PROCESS;
++class wxListBox;
++class wxStaticText;
++
++
++/**
++ * The "Workspace" pane of the project manager: several projects side by side (similar to the
++ * Projects panel of Altium Designer), with a live overview of who has which file open.
++ *
++ * The project that is active in this manager window is edited in-process exactly like in stock
++ * KiCad.  Every other workspace project is edited in its own helper process (a KiCad manager
++ * started with --ws-child whose manager window stays hidden), so that schematic and board of
++ * that project still talk to each other (cross probing, update PCB from schematic, ...).
++ */
++class WORKSPACE_PANE : public wxPanel
++{
++public:
++    WORKSPACE_PANE( KICAD_MANAGER_FRAME* aParent );
++    ~WORKSPACE_PANE() override;
++
++    // Workspace file handling (File > Workspace menu)
++    void NewWorkspace();
++    void OpenWorkspace();
++    void SaveWorkspaceAs();
++    void AddProjectDialog();
++    void AddActiveProject();
++
++    /// The manager loaded (or closed) its active project.
++    void OnProjectLoaded( const wxString& aProFile );
++    void ActiveProjectChanged();
++
++    /// Is this project currently edited by one of our helper processes?
++    bool HasRunningChild( const wxString& aProFile ) const;
++
++    /// Ask all helper processes to close (they prompt for unsaved changes themselves).
++    void CloseChildren();
++
++    /// Trigger a rescan of files and locks as soon as possible.
++    void RequestScan() { m_scanRequested = true; }
++
++    /// Called by WS_CHILD_PROCESS when a helper process ended.
++    void OnChildTerminated( const wxString& aProFile );
++
++    /// Re-apply all translated texts.
++    void ShowChangedLanguage();
++
++private:
++    enum class OPEN_WHAT { SCHEMATIC, PCB };
++
++    struct CHILD
++    {
++        long              pid = 0;
++        wxString          cmdDir;
++        int               seq = 0;
++        WS_CHILD_PROCESS* process = nullptr;
++    };
++
++    void buildUi();
++    void loadInitialWorkspace();
++    void workspaceChanged( bool aSave );
++    void updateCaption();
++
++    void onTimer( wxTimerEvent& aEvent );
++    void startScan();
++    void applySnapshot( std::vector<WS_PROJECT>&& aSnapshot );
++    void rebuildTree();
++    void updateLabels();
++    void reportLockChanges( const std::map<wxString, WS_LOCK_INFO>& aOld,
++                            const std::map<wxString, WS_LOCK_INFO>& aNew );
++    void addActivity( const wxString& aText );
++
++    wxString projectLabel( const WS_PROJECT& aProject ) const;
++    wxString fileLabel( const WS_PROJECT& aProject, const WS_FILE& aFile ) const;
++    wxString lockSuffix( const WS_LOCK_INFO& aLock ) const;
++    wxColour lockColour( const WS_LOCK_INFO& aLock ) const;
++    wxString lockTooltip( const wxString& aPath, const WS_LOCK_INFO& aLock ) const;
++
++    bool isActiveProject( const wxString& aProFile ) const;
++
++    void openInProject( const wxString& aProFile, OPEN_WHAT aWhat );
++    bool launchChild( const wxString& aProFile, OPEN_WHAT aWhat );
++    bool sendCommand( CHILD& aChild, const wxString& aCommand );
++    void setActiveProject( const wxString& aProFile );
++    void removeProject( const wxString& aProFile );
++
++    void onItemActivated( wxTreeEvent& aEvent );
++    void onItemMenu( wxTreeEvent& aEvent );
++    void onItemTooltip( wxTreeEvent& aEvent );
++
++    const WS_PROJECT* findProject( const wxString& aProFile ) const;
++
++private:
++    KICAD_MANAGER_FRAME* m_frame;
++    WORKSPACE            m_workspace;
++
++    wxStaticText*        m_title;
++    wxTreeCtrl*          m_tree;
++    wxListBox*           m_activity;
++    wxTimer              m_timer;
++
++    std::vector<WS_PROJECT>             m_snapshot;
++    std::future<std::vector<WS_PROJECT>> m_scan;
++    std::vector<wxString>               m_scanProjects;   ///< project list the running scan uses
++    bool                                m_scanRequested;
++    bool                                m_firstScanDone;
++    int                                 m_ticksSinceScan;
++    wxString                            m_treeSignature;
++
++    std::map<wxString, wxTreeItemId>    m_projectItems;
++    std::map<wxString, wxTreeItemId>    m_fileItems;
++    std::set<wxString>                  m_collapsed;      ///< projects the user collapsed
++
++    std::map<wxString, CHILD>           m_children;
++    int                                 m_childCounter;
++};
++
++#endif // KICAD_WORKSPACE_PANE_H
+diff --git a/pcbnew/files.cpp b/pcbnew/files.cpp
+index ec57c7ca..a820a7e2 100644
+--- a/pcbnew/files.cpp
++++ b/pcbnew/files.cpp
+@@ -518,6 +518,9 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
+                         lock->GetUsername(),
+                         lock->GetHostname() );
+ 
++            if( !lock->GetDetails().IsEmpty() )
++                msg += wxS( "\n" ) + lock->GetDetails();
++
+             if( !AskOverrideLock( this, msg ) )
+                 return false;
+ 
+diff --git a/translation/pofiles/de.po b/translation/pofiles/de.po
+index a4a852a3..7a25bdbc 100644
+--- a/translation/pofiles/de.po
++++ b/translation/pofiles/de.po
+@@ -62024,6 +62024,247 @@ msgid "Could not create user scripting path %s."
+ msgstr "Benutzer-Skriptpfad %s konnte nicht erstellt werden."
+ 
+ #, c-format
++
++#: workspace fork
++msgid "Opened since %s."
++msgstr "Geöffnet seit %s."
++
++#: workspace fork
++msgid "Opened since %s with '%s'."
++msgstr "Geöffnet seit %s mit '%s'."
++
++#: workspace fork
++msgid "Add project to workspace..."
++msgstr "Projekt zum Workspace hinzufügen..."
++
++#: workspace fork
++msgid "Remove selected project from workspace"
++msgstr "Ausgewähltes Projekt aus dem Workspace entfernen"
++
++#: workspace fork
++msgid "Refresh files and lock states now"
++msgstr "Dateien und Sperrzustände jetzt aktualisieren"
++
++#: workspace fork
++msgid "Activity of other users in the workspace projects"
++msgstr "Aktivität anderer Benutzer in den Workspace-Projekten"
++
++#: workspace fork
++msgid "Default workspace"
++msgstr "Standard-Workspace"
++
++#: workspace fork
++msgid "%s (%d projects)"
++msgstr "%s (%d Projekte)"
++
++#: workspace fork
++msgid "Could not write workspace file '%s'."
++msgstr "Workspace-Datei '%s' konnte nicht geschrieben werden."
++
++#: workspace fork
++msgid "Create New Workspace"
++msgstr "Neuen Workspace erstellen"
++
++#: workspace fork
++msgid "KiCad workspace files"
++msgstr "KiCad-Workspace-Dateien"
++
++#: workspace fork
++msgid "Open Workspace"
++msgstr "Workspace öffnen"
++
++#: workspace fork
++msgid "'%s' is not a valid workspace file."
++msgstr "'%s' ist keine gültige Workspace-Datei."
++
++#: workspace fork
++msgid "Save Workspace As"
++msgstr "Workspace speichern unter"
++
++#: workspace fork
++msgid "Add Projects to Workspace"
++msgstr "Projekte zum Workspace hinzufügen"
++
++#: workspace fork
++msgid "There is no active project that could be added."
++msgstr "Es ist kein aktives Projekt vorhanden, das hinzugefügt werden könnte."
++
++#: workspace fork
++msgid "This project is still open in an editor. Close its editors before removing it from the workspace."
++msgstr "Dieses Projekt ist noch in einem Editor geöffnet. Schließen Sie dessen Editoren, bevor Sie es aus dem Workspace entfernen."
++
++#: workspace fork
++msgid "Unknown user"
++msgstr "Unbekannter Benutzer"
++
++#: workspace fork
++msgid "%s opened %s"
++msgstr "%s hat %s geöffnet"
++
++#: workspace fork
++msgid "%s took over %s (was held by %s)"
++msgstr "%s hat %s übernommen (war geöffnet von %s)"
++
++#: workspace fork
++msgid "%s closed %s"
++msgstr "%s hat %s geschlossen"
++
++#: workspace fork
++msgid "Workspace activity"
++msgstr "Workspace-Aktivität"
++
++#: workspace fork
++msgid "stale lock (crashed session)"
++msgstr "verwaiste Sperre (abgestürzte Sitzung)"
++
++#: workspace fork
++msgid "open on this computer"
++msgstr "auf diesem PC geöffnet"
++
++#: workspace fork
++msgid "in use by %s"
++msgstr "geöffnet von %s"
++
++#: workspace fork
++msgid "in use by %s since %s"
++msgstr "geöffnet von %s seit %s"
++
++#: workspace fork
++msgid "Not open anywhere."
++msgstr "Nirgends geöffnet."
++
++#: workspace fork
++msgid "User:"
++msgstr "Benutzer:"
++
++#: workspace fork
++msgid "Computer:"
++msgstr "PC:"
++
++#: workspace fork
++msgid "Since:"
++msgstr "Seit:"
++
++#: workspace fork
++msgid "Application:"
++msgstr "Anwendung:"
++
++#: workspace fork
++msgid "The process that created this lock no longer exists. The lock is removed automatically when the file is opened."
++msgstr "Der Prozess, der diese Sperre angelegt hat, existiert nicht mehr. Die Sperre wird beim Öffnen der Datei automatisch entfernt."
++
++#: workspace fork
++msgid "not found"
++msgstr "nicht gefunden"
++
++#: workspace fork
++msgid "active"
++msgstr "aktiv"
++
++#: workspace fork
++msgid "open"
++msgstr "geöffnet"
++
++#: workspace fork
++msgid "Open Schematic Editor"
++msgstr "Schaltplaneditor öffnen"
++
++#: workspace fork
++msgid "Open PCB Editor"
++msgstr "Leiterplatteneditor öffnen"
++
++#: workspace fork
++msgid "Make Active Project of This Window"
++msgstr "Zum aktiven Projekt dieses Fensters machen"
++
++#: workspace fork
++msgid "Open Project Folder"
++msgstr "Projektordner öffnen"
++
++#: workspace fork
++msgid "Remove Project from Workspace"
++msgstr "Projekt aus dem Workspace entfernen"
++
++#: workspace fork
++msgid "This project is open in its own editor windows. Close them first to make it the active project of this window."
++msgstr "Dieses Projekt ist in eigenen Editorfenstern geöffnet. Schließen Sie diese zuerst, um es zum aktiven Projekt dieses Fensters zu machen."
++
++#: workspace fork
++msgid "Project file '%s' not found."
++msgstr "Projektdatei '%s' nicht gefunden."
++
++#: workspace fork
++msgid "Opening project '%s'..."
++msgstr "Öffne Projekt '%s'..."
++
++#: workspace fork
++msgid "Could not create folder '%s'."
++msgstr "Ordner '%s' konnte nicht angelegt werden."
++
++#: workspace fork
++msgid "Could not start the editor process."
++msgstr "Der Editor-Prozess konnte nicht gestartet werden."
++
++#: workspace fork
++msgid "Workspace"
++msgstr "Workspace"
++
++#: workspace fork
++msgid "Add Project to Workspace..."
++msgstr "Projekt zum Workspace hinzufügen..."
++
++#: workspace fork
++msgid "Add one or more existing projects to the workspace"
++msgstr "Ein oder mehrere vorhandene Projekte zum Workspace hinzufügen"
++
++#: workspace fork
++msgid "Add Active Project to Workspace"
++msgstr "Aktives Projekt zum Workspace hinzufügen"
++
++#: workspace fork
++msgid "Add the project that is open in this window to the workspace"
++msgstr "Das in diesem Fenster geöffnete Projekt zum Workspace hinzufügen"
++
++#: workspace fork
++msgid "New Workspace..."
++msgstr "Neuer Workspace..."
++
++#: workspace fork
++msgid "Create a new, empty workspace file"
++msgstr "Eine neue, leere Workspace-Datei erstellen"
++
++#: workspace fork
++msgid "Open Workspace..."
++msgstr "Workspace öffnen..."
++
++#: workspace fork
++msgid "Open a workspace file (a list of projects)"
++msgstr "Eine Workspace-Datei (Projektliste) öffnen"
++
++#: workspace fork
++msgid "Save Workspace As..."
++msgstr "Workspace speichern unter..."
++
++#: workspace fork
++msgid "Save the list of workspace projects to a new workspace file"
++msgstr "Die Projektliste des Workspace in eine neue Workspace-Datei speichern"
++
++#: workspace fork
++msgid "Refresh Lock States"
++msgstr "Sperrzustände aktualisieren"
++
++#: workspace fork
++msgid "Rescan the workspace projects for files opened by other users"
++msgstr "Workspace-Projekte erneut auf von anderen Benutzern geöffnete Dateien prüfen"
++
++#: workspace fork
++msgid "Show/Hide Workspace Pane"
++msgstr "Workspace-Bereich ein-/ausblenden"
++
++#: workspace fork
++msgid "Show or hide the workspace pane"
++msgstr "Den Workspace-Bereich ein- oder ausblenden"
++
+ #~ msgid "Symbol '%s.asy' not found"
+ #~ msgstr "Symbol \"%s.asy\" nicht gefunden"
+ 
+-- 
+2.43.0
+
+
+From 4e0718587bbbd565a6129b3e9bdd1a1c278a67d8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Nov 2026 09:56:41 +0100
+Subject: [PATCH 2/5] Workspace fork: wider workspace column, compact German
+ lock labels, status text cleanup
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ kicad/kicad_manager_frame.cpp |  5 +++++
+ kicad/workspace_pane.cpp      | 15 +++++++++++++++
+ kicad/workspace_pane.h        |  1 +
+ translation/pofiles/de.po     |  6 +++---
+ 4 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/kicad/kicad_manager_frame.cpp b/kicad/kicad_manager_frame.cpp
+index 6ec73a27..2a83e10e 100644
+--- a/kicad/kicad_manager_frame.cpp
++++ b/kicad/kicad_manager_frame.cpp
+@@ -250,6 +250,11 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+     // active project.  A workspace helper process has no visible manager and needs no pane.
+     if( !IsWorkspaceChild() )
+     {
++        // The workspace tree shows "file  -  user@computer" and needs more room than the plain
++        // file tree; widen the left column unless the user already chose a width.
++        if( m_leftWinWidth <= defaultLeftWinWidth )
++            m_leftWinWidth = FromDIP( 360 );
++
+         m_workspacePane = new WORKSPACE_PANE( this );
+         m_auimgr.AddPane( m_workspacePane,
+                           EDA_PANE().Palette().Name( "Workspace" ).Left().Layer( 1 ).Position( 0 )
+diff --git a/kicad/workspace_pane.cpp b/kicad/workspace_pane.cpp
+index 9b1a8cf6..697d36d9 100644
+--- a/kicad/workspace_pane.cpp
++++ b/kicad/workspace_pane.cpp
+@@ -562,6 +562,18 @@ void WORKSPACE_PANE::applySnapshot( std::vector<WS_PROJECT>&& aSnapshot )
+     else
+         updateLabels();
+ 
++    // The "Opening project ..." hint has done its job once the helper holds the project
++    if( !m_openingProject.IsEmpty() )
++    {
++        const WS_PROJECT* opening = findProject( m_openingProject );
++
++        if( !opening || opening->lock.locked || !HasRunningChild( m_openingProject ) )
++        {
++            m_frame->SetStatusText( wxEmptyString, 0 );
++            m_openingProject.clear();
++        }
++    }
++
+     if( m_firstScanDone )
+         reportLockChanges( oldLocks, newLocks );
+     else
+@@ -1009,6 +1021,7 @@ void WORKSPACE_PANE::OnChildTerminated( const wxString& aProFile )
+         m_children.erase( it );
+     }
+ 
++    m_frame->SetStatusText( wxEmptyString, 0 );
+     updateLabels();
+     RequestScan();
+ }
+@@ -1063,7 +1076,9 @@ void WORKSPACE_PANE::openInProject( const wxString& aProFile, OPEN_WHAT aWhat )
+     {
+         m_frame->SetStatusText( wxString::Format( _( "Opening project '%s'..." ),
+                                                   wxFileName( aProFile ).GetName() ), 0 );
++        m_openingProject = aProFile;
+         updateLabels();
++        RequestScan();
+     }
+ }
+ 
+diff --git a/kicad/workspace_pane.h b/kicad/workspace_pane.h
+index b32f66a2..41100415 100644
+--- a/kicad/workspace_pane.h
++++ b/kicad/workspace_pane.h
+@@ -146,6 +146,7 @@ private:
+ 
+     std::map<wxString, CHILD>           m_children;
+     int                                 m_childCounter;
++    wxString                            m_openingProject; ///< project a helper is starting for
+ };
+ 
+ #endif // KICAD_WORKSPACE_PANE_H
+diff --git a/translation/pofiles/de.po b/translation/pofiles/de.po
+index 7a25bdbc..61c67575 100644
+--- a/translation/pofiles/de.po
++++ b/translation/pofiles/de.po
+@@ -62119,15 +62119,15 @@ msgstr "verwaiste Sperre (abgestürzte Sitzung)"
+ 
+ #: workspace fork
+ msgid "open on this computer"
+-msgstr "auf diesem PC geöffnet"
++msgstr "hier geöffnet"
+ 
+ #: workspace fork
+ msgid "in use by %s"
+-msgstr "geöffnet von %s"
++msgstr "%s"
+ 
+ #: workspace fork
+ msgid "in use by %s since %s"
+-msgstr "geöffnet von %s seit %s"
++msgstr "%s seit %s"
+ 
+ #: workspace fork
+ msgid "Not open anywhere."
+-- 
+2.43.0
+
+
+From 86fa337f9f2a6590c285758729ad54b525810201 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Nov 2026 10:00:50 +0100
+Subject: [PATCH 3/5] Workspace fork: helper removes its command folder on exit
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ kicad/kicad_manager_frame.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/kicad/kicad_manager_frame.cpp b/kicad/kicad_manager_frame.cpp
+index 2a83e10e..4e3c619a 100644
+--- a/kicad/kicad_manager_frame.cpp
++++ b/kicad/kicad_manager_frame.cpp
+@@ -780,6 +780,13 @@ void KICAD_MANAGER_FRAME::doCloseWindow()
+     }
+ #endif
+ 
++    // Workspace fork: a helper process cleans up its command folder
++    if( IsWorkspaceChild() && wxDir::Exists( s_WorkspaceChildDir ) )
++    {
++        wxLogNull noLog;
++        wxFileName::Rmdir( s_WorkspaceChildDir, wxPATH_RMDIR_RECURSIVE );
++    }
++
+     m_projectTreePane->Show( false );
+     Pgm().m_Quitting = true;
+ 
+-- 
+2.43.0
+
+
+From 0608c56d532d7e53f8bb4a78328be99141a6b438 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Nov 2026 10:02:45 +0100
+Subject: [PATCH 4/5] Workspace fork: taller default workspace pane
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ kicad/kicad_manager_frame.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kicad/kicad_manager_frame.cpp b/kicad/kicad_manager_frame.cpp
+index 4e3c619a..70961986 100644
+--- a/kicad/kicad_manager_frame.cpp
++++ b/kicad/kicad_manager_frame.cpp
+@@ -259,7 +259,7 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+         m_auimgr.AddPane( m_workspacePane,
+                           EDA_PANE().Palette().Name( "Workspace" ).Left().Layer( 1 ).Position( 0 )
+                                     .Caption( WORKSPACE_CAPTION ).PaneBorder( false )
+-                                    .BestSize( m_leftWinWidth, FromDIP( 260 ) )
++                                    .BestSize( m_leftWinWidth, FromDIP( 400 ) )
+                                     .MinSize( m_leftWinWidth, FromDIP( 120 ) )
+                                     .Floatable( false ).Movable( false ).CloseButton( true ) );
+     }
+-- 
+2.43.0
+
+
+From 7d9a070207b56f511d2f1a11846d346e940c503b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Nov 2026 10:08:19 +0100
+Subject: [PATCH 5/5] Workspace fork: splitter between project tree and
+ activity list
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ kicad/workspace_pane.cpp | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/kicad/workspace_pane.cpp b/kicad/workspace_pane.cpp
+index 697d36d9..2c7322d7 100644
+--- a/kicad/workspace_pane.cpp
++++ b/kicad/workspace_pane.cpp
+@@ -34,6 +34,7 @@
+ #include <wx/process.h>
+ #include <wx/settings.h>
+ #include <wx/sizer.h>
++#include <wx/splitter.h>
+ #include <wx/stattext.h>
+ #include <wx/stdpaths.h>
+ #include <wx/utils.h>
+@@ -197,7 +198,13 @@ void WORKSPACE_PANE::buildUi()
+ 
+     mainSizer->Add( barSizer, 0, wxEXPAND | wxTOP | wxBOTTOM, 2 );
+ 
+-    m_tree = new wxTreeCtrl( this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
++    // Tree above, activity list below, with a sash the user can drag
++    wxSplitterWindow* splitter = new wxSplitterWindow( this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
++                                                       wxSP_LIVE_UPDATE | wxSP_NOBORDER );
++    splitter->SetSashGravity( 1.0 );
++    splitter->SetMinimumPaneSize( FromDIP( 40 ) );
++
++    m_tree = new wxTreeCtrl( splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                              wxTR_HAS_BUTTONS | wxTR_SINGLE | wxTR_HIDE_ROOT | wxTR_LINES_AT_ROOT
+                                      | wxTR_NO_LINES | wxBORDER_NONE );
+ 
+@@ -209,12 +216,12 @@ void WORKSPACE_PANE::buildUi()
+     images.push_back( KiBitmapBundleDef( BITMAPS::unknown, 22 ) );          // WS_ICON_MISSING
+     m_tree->SetImages( images );
+ 
+-    mainSizer->Add( m_tree, 3, wxEXPAND );
+-
+-    m_activity = new wxListBox( this, wxID_ANY, wxDefaultPosition, wxSize( -1, FromDIP( 70 ) ), 0,
+-                                nullptr, wxLB_SINGLE | wxLB_HSCROLL | wxBORDER_NONE );
++    m_activity = new wxListBox( splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, nullptr,
++                                wxLB_SINGLE | wxLB_HSCROLL | wxBORDER_NONE );
+     m_activity->SetToolTip( _( "Activity of other users in the workspace projects" ) );
+-    mainSizer->Add( m_activity, 1, wxEXPAND | wxTOP, 2 );
++
++    splitter->SplitHorizontally( m_tree, m_activity, -FromDIP( 80 ) );
++    mainSizer->Add( splitter, 1, wxEXPAND );
+ 
+     SetSizer( mainSizer );
+ 
+-- 
+2.43.0
+
