@@ -1,0 +1,160 @@
+name: Windows-Installer
+
+# Baut den KiCad-Workspace-Fork (KiCad 10.0.8 + Patch) mit MSVC und vcpkg auf einem
+# Windows-Server von GitHub und legt den Installer als Artefakt ab.
+#
+# Start: automatisch bei jeder Aenderung an ci/, patch/ oder diesem Workflow,
+#        oder von Hand ueber  Actions > Windows-Installer > Run workflow.
+#
+# Der erste Lauf baut alle Abhaengigkeiten (wxWidgets, OpenCASCADE, Python, ...) und dauert
+# mehrere Stunden. Die Ergebnisse werden zwischengespeichert; spaetere Laeufe sind deutlich
+# schneller. Bricht Job 1 wegen der Zeitgrenze ab, einfach erneut starten - er setzt auf dem
+# Zwischenspeicher auf.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/windows-installer.yml'
+      - 'ci/**'
+      - 'patch/**'
+
+concurrency:
+  group: windows-installer
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  KWS_ROOT: 'C:\k'
+  VCPKG_CACHE_KEY: vcpkg-x64-windows-release-v1
+
+jobs:
+  deps:
+    name: 1 - Abhaengigkeiten (vcpkg)
+    runs-on: windows-2022
+    timeout-minutes: 355
+    steps:
+      - name: Repository holen
+        uses: actions/checkout@v4
+
+      - name: Zwischenspeicher der Abhaengigkeiten laden
+        uses: actions/cache/restore@v4
+        with:
+          path: 'C:\k\vc'
+          key: ${{ env.VCPKG_CACHE_KEY }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ env.VCPKG_CACHE_KEY }}-
+
+      - name: Vorbereiten (Werkzeuge, KiCad-Quellen, Patch, vcpkg)
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage prepare
+
+      - name: Abhaengigkeiten bauen und KiCad konfigurieren
+        shell: pwsh
+        timeout-minutes: 320
+        run: ./ci/build.ps1 -Stage configure
+
+      - name: Protokolle einsammeln
+        if: failure()
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage logs
+
+      - name: Zwischenspeicher der Abhaengigkeiten sichern
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: 'C:\k\vc'
+          key: ${{ env.VCPKG_CACHE_KEY }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Protokolle hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protokolle-1-abhaengigkeiten
+          path: 'C:\k\out\logs'
+          if-no-files-found: ignore
+          retention-days: 14
+
+  build:
+    name: 2 - KiCad bauen und Installer erzeugen
+    needs: deps
+    runs-on: windows-2022
+    timeout-minutes: 355
+    steps:
+      - name: Repository holen
+        uses: actions/checkout@v4
+
+      - name: Zwischenspeicher der Abhaengigkeiten laden
+        uses: actions/cache/restore@v4
+        with:
+          path: 'C:\k\vc'
+          key: ${{ env.VCPKG_CACHE_KEY }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ env.VCPKG_CACHE_KEY }}-
+
+      - name: Vorbereiten (Werkzeuge, KiCad-Quellen, Patch, vcpkg)
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage prepare
+
+      - name: Konfigurieren (Abhaengigkeiten aus dem Zwischenspeicher)
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage configure
+
+      - name: KiCad kompilieren
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage build
+
+      - name: Paketbaum zusammenstellen und pruefen
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage package
+
+      - name: Kurztests (kicad-cli, Python)
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage smoke
+
+      - name: Sichtkontrolle (Bildschirmfotos des Projektmanagers)
+        continue-on-error: true
+        timeout-minutes: 8
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage gui
+
+      - name: Installer bauen
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage installer
+
+      - name: Installer hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: kicad-riegl-ws-windows-installer
+          path: |
+            C:\k\out\*.exe
+            C:\k\out\SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Bildschirmfotos hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bildschirmfotos
+          path: 'C:\k\out\screenshots'
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Protokolle einsammeln
+        if: failure()
+        shell: pwsh
+        run: ./ci/build.ps1 -Stage logs
+
+      - name: Protokolle hochladen
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protokolle-2-build
+          path: 'C:\k\out\logs'
+          if-no-files-found: ignore
+          retention-days: 14
