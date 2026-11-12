@@ -1,0 +1,53 @@
+name: Linux-Paket
+
+# Baut den KiCad-Workspace-Fork (KiCad 10.0.8 + Patch) als .deb-Paket fuer
+# Ubuntu 24.04 / Linux Mint 22 und legt es als Artefakt ab.
+#
+# Start: automatisch bei jeder Aenderung an patch/ oder den Linux-Skripten,
+#        oder von Hand ueber  Actions > Linux-Paket > Run workflow.
+# Dauer: etwa 1 bis 2 Stunden.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/linux-paket.yml'
+      - 'ci/linux-build.sh'
+      - 'ci/make_deb.sh'
+      - 'patch/**'
+
+concurrency:
+  group: linux-paket
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: .deb-Paket bauen
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Repository holen
+        uses: actions/checkout@v4
+
+      - name: Plattenplatz schaffen
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Bauen, Paket erzeugen, Kurztest
+        run: bash ci/linux-build.sh "$HOME/kws"
+
+      - name: Paket hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: kicad-riegl-ws-linux-paket
+          path: |
+            ~/kws/dist/*.deb
+            ~/kws/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
