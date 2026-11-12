@@ -1,62 +1,89 @@
-# kicad-fork – Windows-Installer per GitHub Actions
+# kicad-fork – Builds per GitHub Actions
 
-Dieses Repository baut den **KiCad Workspace-Fork (RIEGL)** für Windows 10/11 (64 Bit):
-offizielles KiCad 10.0.8 plus der Patch in `patch/`, übersetzt mit Microsoft-Compiler (MSVC)
-und vcpkg nach KiCads eigener Paketliste. Ergebnis ist ein Installer
-`kicad-riegl-ws-10.0.8-rieglws1-x86_64.exe`.
+Dieses Repository baut den **KiCad Workspace-Fork (RIEGL)** auf den Servern von GitHub:
 
-> Stand: Der Ablauf ist vollständig vorbereitet, aber **noch nie gelaufen**. Der erste Lauf
-> zeigt, ob alle Schritte auf dem GitHub-Server durchgehen; mit Korrekturen ist zu rechnen.
+| Ablauf (Workflow) | Ergebnis | Dauer |
+|---|---|---|
+| **Windows-Installer** | `kicad-riegl-ws-10.0.8-rieglws2-x86_64.exe` (Windows 10/11, 64 Bit) | mehrere Stunden; am längsten, wenn der Zwischenspeicher leer ist |
+| **Linux-Paket** | `kicad-riegl-ws_10.0.8+rieglws2_amd64.deb` (Ubuntu 24.04 / Linux Mint 22) | geschätzt 1–2 Stunden |
+
+Gebaut wird jeweils das offizielle KiCad 10.0.8 plus der Patch in `patch/`.
+
+> Der Windows-Ablauf ist mit Version rieglws1 erfolgreich gelaufen. Der Linux-Ablauf ist neu
+> und **noch nie auf GitHub gelaufen**; seine Schritte entsprechen dem Build, mit dem das
+> mitgelieferte .deb entstanden ist.
 
 ## Inhalt
 
 | Pfad | Zweck |
 |---|---|
-| `.github/workflows/windows-installer.yml` | Ablauf auf dem GitHub-Server (zwei Jobs) |
-| `ci/build.ps1` | Alle Build-Schritte als PowerShell-Skript (auch lokal verwendbar) |
-| `ci/installer.nsi` | Installer-Beschreibung (NSIS) |
-| `ci/triplets/x64-windows.cmake` | vcpkg-Einstellung: nur Release-Varianten der Abhängigkeiten |
-| `patch/kicad-10.0.8-riegl-workspace.patch` | Die Fork-Änderungen gegenüber KiCad 10.0.8 |
+| `patch/kicad-10.0.8-riegl-workspace.patch` | Alle Fork-Änderungen gegenüber KiCad 10.0.8 – **das ist die Datei, die sich mit jeder neuen Version ändert** |
+| `ci/build.ps1` | Windows: alle Build-Schritte (enthält die Versionsnummer) |
+| `ci/installer.nsi` | Windows: Installer-Beschreibung (NSIS) |
+| `ci/triplets/x64-windows.cmake` | Windows: vcpkg-Einstellung |
+| `ci/linux-build.sh` | Linux: alle Build-Schritte (enthält die Versionsnummer) |
+| `ci/make_deb.sh` | Linux: erzeugt das .deb-Paket |
+| `workflow-dateien/*.yml` | Vorlagen der beiden Workflow-Dateien zum Einfügen (siehe unten) |
+| `.github/workflows/*.yml` | Die aktiven Workflow-Dateien (nur im Repository auf GitHub) |
 
-## Ablauf starten
+## A – Neue Version hochladen (Normalfall)
 
-Der Ablauf startet automatisch, sobald diese Dateien im Zweig `main` liegen, und lässt sich
-jederzeit von Hand starten: **Actions → Windows-Installer → Run workflow**.
+1. Im Browser `https://github.com/anaCIRdes/kicad-fork` öffnen.
+2. **Add file → Upload files**.
+3. Aus dem Ordner `KiCAD-Fork\github` die Ordner **`ci`** und **`patch`** sowie **`README.md`** in das Browserfenster ziehen. Vorhandene Dateien werden dabei ersetzt.
+4. Unten bei *Commit changes* einen kurzen Text eintragen (z. B. „Version rieglws2“) und **Commit changes** klicken.
+5. Beide Abläufe starten von selbst. Kontrolle unter **Actions**.
 
-1. **Job 1 – Abhängigkeiten**: baut wxWidgets, OpenCASCADE, Python, wxPython, ngspice usw.
-   Beim ersten Mal mehrere Stunden. Das Ergebnis wird zwischengespeichert.
-   Bricht der Job an der Zeitgrenze (knapp 6 Stunden) ab: einfach neu starten, er macht
-   dort weiter, wo der Zwischenspeicher steht.
-2. **Job 2 – KiCad und Installer**: kompiliert KiCad, stellt das Paket zusammen, prüft es
-   (fehlende DLLs, `kicad-cli`, Python-Modul), macht Bildschirmfotos des Projektmanagers und
-   baut den Installer.
+Die Workflow-Dateien müssen dabei nicht angefasst werden, solange sich an ihnen nichts ändert. Ob sich eine geändert hat, steht jeweils in der Readme der Lieferung.
 
-## Installer herunterladen
+## B – Workflow-Datei erstellen (einmalig je Ablauf)
 
-**Actions →** den Lauf mit grünem Haken öffnen **→** unten bei *Artifacts*:
+Der Windows-Ablauf existiert bereits. Für den **Linux-Ablauf** einmalig:
 
-- `kicad-riegl-ws-windows-installer` – der Installer (als ZIP verpackt) mit Prüfsumme
-- `bildschirmfotos` – Sichtkontrolle vom Build-Server
-- `protokolle-…` – Protokolle, wichtig bei einem Fehler
+1. Im Repository **Add file → Create new file**.
+2. Als Dateinamen exakt eintippen: `.github/workflows/linux-paket.yml`
+   (die Schrägstriche erzeugen die Unterordner automatisch).
+3. Die Datei `KiCAD-Fork\github\workflow-dateien\linux-paket.yml` in einem Texteditor öffnen, alles markieren, kopieren und in das große Textfeld einfügen.
+4. **Commit changes…** → **Commit changes**.
 
-## Was der Installer macht
+Eine bestehende Workflow-Datei ändern: im Repository `.github/workflows/<name>.yml` anklicken → Stift-Symbol (*Edit this file*) → Inhalt komplett durch die neue Vorlage ersetzen → **Commit changes**.
 
-- Installiert nach `C:\Program Files\KiCad-RIEGL-Workspace\10.0`, eigener Startmenü-Eintrag
-  „KiCad Workspace (RIEGL)“. Ein vorhandenes Standard-KiCad bleibt unverändert; es werden keine
-  Dateitypen umgestellt.
+## C – Ablauf starten und verfolgen
+
+- **Automatisch**: nach jedem Hochladen von Dateien unter `ci/` oder `patch/`.
+- **Von Hand**: **Actions** → links den Ablauf wählen (*Windows-Installer* oder *Linux-Paket*) → rechts **Run workflow** → **Run workflow**.
+- Ein laufender Ablauf hat einen gelben Punkt, ein fertiger einen grünen Haken, ein fehlgeschlagener ein rotes Kreuz.
+- Wird während eines Laufs erneut hochgeladen, bricht GitHub den alten Lauf ab und startet neu.
+- Windows, Job 1 (Abhängigkeiten): Das Ergebnis liegt im Zwischenspeicher. Wird dieser länger als 7 Tage nicht benutzt, löscht GitHub ihn und der nächste Lauf baut die Abhängigkeiten neu (mehrere Stunden). Bricht Job 1 an der Zeitgrenze ab, einfach neu starten.
+
+## D – Ergebnis herunterladen
+
+**Actions** → den Lauf mit grünem Haken öffnen → ganz unten **Artifacts**:
+
+- `kicad-riegl-ws-windows-installer` – Installer und Prüfsumme (als ZIP)
+- `kicad-riegl-ws-linux-paket` – .deb-Paket und Prüfsumme (als ZIP)
+- `bildschirmfotos` – Sichtkontrolle des Projektmanagers vom Windows-Server
+- `protokolle-…` – vollständige Protokolle
+
+Artefakte werden nach 30 Tagen gelöscht (Protokolle und Bildschirmfotos nach 14).
+
+## E – Bei einem Fehler
+
+Den Lauf öffnen → den Job mit rotem Kreuz anklicken → der fehlgeschlagene Schritt ist aufgeklappt. Für die Fehlersuche werden gebraucht: der **Name des Schritts** und die **letzten 30–50 Zeilen** seines Protokolls. Nach einer Korrektur unter `ci/` oder `patch/` startet der Ablauf von selbst neu; unter Windows kommen die bereits gebauten Abhängigkeiten aus dem Zwischenspeicher.
+
+## Was die Pakete machen
+
+**Windows-Installer**
+
+- Installiert nach `C:\Program Files\KiCad-RIEGL-Workspace\10.0`, Startmenü-Eintrag „KiCad Workspace (RIEGL)“. Eine vorhandene ältere Fork-Version wird dabei ersetzt. Ein Standard-KiCad bleibt unverändert; es werden keine Dateitypen umgestellt.
 - Die Einstellungen (`%APPDATA%\kicad\10.0`) werden mit einem Standard-KiCad 10.0 geteilt.
-- Option „Bibliotheken des Standard-KiCad 10.0 mitbenutzen“: bindet dessen Symbol-,
-  Footprint- und 3D-Bibliotheken als Verknüpfung ein. Ohne Standard-KiCad müssen die Pfade in
-  KiCad unter *Einstellungen → Pfade konfigurieren* gesetzt werden.
-- Der Installer ist **nicht signiert**; Windows SmartScreen zeigt deshalb beim Start eine
-  Warnung („Weitere Informationen → Trotzdem ausführen“).
+- Enthält keine Symbol-, Footprint- und 3D-Bibliotheken (deshalb rund 125 MB statt rund 1 GB). Die Option „Bibliotheken des Standard-KiCad 10.0 mitbenutzen“ bindet die eines installierten Standard-KiCad ein.
+- Nicht signiert: Windows SmartScreen warnt beim Start („Weitere Informationen → Trotzdem ausführen“).
 
-## Bei einem Fehler
+**Linux-Paket**
 
-Den fehlgeschlagenen Schritt im Lauf öffnen; die letzten Zeilen des Protokolls nennen die
-Ursache. Zusätzlich liegen unter *Artifacts* die vollständigen Protokolle. Nach einer Korrektur
-in `ci/` startet der Ablauf von selbst neu; die bereits gebauten Abhängigkeiten kommen aus dem
-Zwischenspeicher.
+- `sudo apt install ./kicad-riegl-ws_10.0.8+rieglws2_amd64.deb`, installiert nach `/opt/kicad-riegl-ws`, Start mit `kicad-riegl-ws`.
+- Nur für Ubuntu 24.04 und Linux Mint 22; auf Ubuntu 22.04 fehlen die nötigen Bibliotheksversionen.
 
 ## Lizenz
 

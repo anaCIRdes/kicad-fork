@@ -1,7 +1,7 @@
 From b9864a946de3155660b9d6ed3129f9ea3159f2d2 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 07:23:53 +0100
-Subject: [PATCH 1/5] Workspace fork: multi-project workspace pane, helper
+Subject: [PATCH 1/7] Workspace fork: multi-project workspace pane, helper
  processes, extended lock info
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
@@ -3005,7 +3005,7 @@ index a4a852a3..7a25bdbc 100644
 From 4e0718587bbbd565a6129b3e9bdd1a1c278a67d8 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 09:56:41 +0100
-Subject: [PATCH 2/5] Workspace fork: wider workspace column, compact German
+Subject: [PATCH 2/7] Workspace fork: wider workspace column, compact German
  lock labels, status text cleanup
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
@@ -3116,7 +3116,7 @@ index 7a25bdbc..61c67575 100644
 From 86fa337f9f2a6590c285758729ad54b525810201 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 10:00:50 +0100
-Subject: [PATCH 3/5] Workspace fork: helper removes its command folder on exit
+Subject: [PATCH 3/7] Workspace fork: helper removes its command folder on exit
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
@@ -3149,7 +3149,7 @@ index 2a83e10e..4e3c619a 100644
 From 0608c56d532d7e53f8bb4a78328be99141a6b438 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 10:02:45 +0100
-Subject: [PATCH 4/5] Workspace fork: taller default workspace pane
+Subject: [PATCH 4/7] Workspace fork: taller default workspace pane
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
@@ -3177,7 +3177,7 @@ index 4e3c619a..70961986 100644
 From 7d9a070207b56f511d2f1a11846d346e940c503b Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 10:08:19 +0100
-Subject: [PATCH 5/5] Workspace fork: splitter between project tree and
+Subject: [PATCH 5/7] Workspace fork: splitter between project tree and
  activity list
 
 Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
@@ -3231,6 +3231,2640 @@ index 697d36d9..2c7322d7 100644
  
      SetSizer( mainSizer );
  
+-- 
+2.43.0
+
+
+From b6449484458944604f9363c97c092db92e9e2a60 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 07:37:00 +0100
+Subject: [PATCH 6/7] Workspace fork: editors as tabs with split view, reliable
+ activation of open editors
+
+Editor frames of all workspace projects are docked as tabs into the manager
+window (native top level windows kept over placeholder pages); the notebook
+can be split to show two editors side by side. Open editors are brought to
+the front by the manager through their native window handle.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ kicad/CMakeLists.txt                          |   1 +
+ kicad/kicad_id.h                              |   3 +-
+ kicad/kicad_manager_frame.cpp                 | 146 +++-
+ kicad/kicad_manager_frame.h                   |  14 +
+ kicad/menubar.cpp                             |   9 +
+ kicad/workspace.cpp                           |  50 +-
+ kicad/workspace.h                             |   4 +
+ kicad/workspace_dock.cpp                      | 827 ++++++++++++++++++
+ kicad/workspace_dock.h                        | 145 +++
+ kicad/workspace_pane.cpp                      |  40 +-
+ kicad/workspace_pane.h                        |  11 +
+ libs/kiplatform/CMakeLists.txt                |   7 +
+ .../include/kiplatform/window_embed.h         |  70 ++
+ libs/kiplatform/port/wxgtk/window_embed.cpp   | 371 ++++++++
+ libs/kiplatform/port/wxmsw/window_embed.cpp   | 187 ++++
+ libs/kiplatform/port/wxosx/window_embed.mm    |  27 +
+ translation/pofiles/de.po                     |  36 +
+ 17 files changed, 1935 insertions(+), 13 deletions(-)
+ create mode 100644 kicad/workspace_dock.cpp
+ create mode 100644 kicad/workspace_dock.h
+ create mode 100644 libs/kiplatform/include/kiplatform/window_embed.h
+ create mode 100644 libs/kiplatform/port/wxgtk/window_embed.cpp
+ create mode 100644 libs/kiplatform/port/wxmsw/window_embed.cpp
+ create mode 100644 libs/kiplatform/port/wxosx/window_embed.mm
+
+diff --git a/kicad/CMakeLists.txt b/kicad/CMakeLists.txt
+index dc785e66..5bb37cb2 100644
+--- a/kicad/CMakeLists.txt
++++ b/kicad/CMakeLists.txt
+@@ -46,6 +46,7 @@ set( KICAD_SRCS
+     project_tree_traverser.cpp
+     update_manager.cpp
+     workspace.cpp
++    workspace_dock.cpp
+     workspace_pane.cpp
+     toolbars_kicad_manager.cpp
+     tools/kicad_manager_actions.cpp
+diff --git a/kicad/kicad_id.h b/kicad/kicad_id.h
+index 29ac9048..b74e6c3c 100644
+--- a/kicad/kicad_id.h
++++ b/kicad/kicad_id.h
+@@ -51,7 +51,8 @@ enum id_kicad_frm {
+     ID_WORKSPACE_ADD_PROJECT,
+     ID_WORKSPACE_ADD_ACTIVE,
+     ID_WORKSPACE_REFRESH,
+-    ID_WORKSPACE_TOGGLE_PANE
++    ID_WORKSPACE_TOGGLE_PANE,
++    ID_WORKSPACE_TOGGLE_TABS
+ };
+ 
+ #endif
+diff --git a/kicad/kicad_manager_frame.cpp b/kicad/kicad_manager_frame.cpp
+index 70961986..a7bbdf0e 100644
+--- a/kicad/kicad_manager_frame.cpp
++++ b/kicad/kicad_manager_frame.cpp
+@@ -29,6 +29,8 @@
+ #include "project_tree_pane.h"
+ #include "local_history_pane.h"
+ #include "workspace_pane.h"
++#include "workspace_dock.h"
++#include <kiplatform/window_embed.h>
+ #include "widgets/bitmap_button.h"
+ 
+ #include <advanced_config.h>
+@@ -136,7 +138,7 @@ BEGIN_EVENT_TABLE( KICAD_MANAGER_FRAME, EDA_BASE_FRAME )
+     EVT_MENU( ID_INIT_WATCHED_PATHS, KICAD_MANAGER_FRAME::OnChangeWatchedPaths )
+ 
+     // Workspace fork
+-    EVT_MENU_RANGE( ID_WORKSPACE_NEW, ID_WORKSPACE_TOGGLE_PANE, KICAD_MANAGER_FRAME::OnWorkspaceMenu )
++    EVT_MENU_RANGE( ID_WORKSPACE_NEW, ID_WORKSPACE_TOGGLE_TABS, KICAD_MANAGER_FRAME::OnWorkspaceMenu )
+ 
+     // Drop files event
+     EVT_DROP_FILES( KICAD_MANAGER_FRAME::OnDropFiles )
+@@ -166,7 +168,8 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+         m_workspacePane( nullptr ),
+         m_wsChildBusy( false ),
+         m_wsChildStarted( false ),
+-        m_wsChildIdleTicks( 0 )
++        m_wsChildIdleTicks( 0 ),
++        m_workspaceDock( nullptr )
+ {
+     const int defaultLeftWinWidth = FromDIP( 250 );
+ 
+@@ -282,7 +285,8 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+     m_notebook = new wxAuiNotebook( this, wxID_ANY, wxPoint( client_size.x, client_size.y ),
+                                     FromDIP( wxSize( 700, 590 ) ),
+                                     wxAUI_NB_TOP | wxAUI_NB_CLOSE_ON_ALL_TABS | wxAUI_NB_TAB_MOVE
+-                                            | wxAUI_NB_SCROLL_BUTTONS | wxNO_BORDER );
++                                            | wxAUI_NB_TAB_SPLIT | wxAUI_NB_SCROLL_BUTTONS
++                                            | wxNO_BORDER );
+ 
+     m_notebook->SetArtProvider( new WX_AUI_TAB_ART() );
+ 
+@@ -299,6 +303,16 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
+     m_auimgr.AddPane( m_notebook, EDA_PANE().Canvas().Name( "Editors" ).Center().Caption( EDITORS_CAPTION )
+                                             .PaneBorder( false ).MinSize( m_notebook->GetBestSize() ) );
+ 
++    // Workspace fork: editor frames of all workspace projects as tabs of this notebook
++    if( m_workspacePane )
++    {
++        m_workspaceDock = new WORKSPACE_DOCK( this, m_notebook, m_workspacePane );
++        m_workspacePane->SetDock( m_workspaceDock );
++
++        // The menu was built before the dock existed; show the right check mark
++        ReCreateMenuBar();
++    }
++
+     m_auimgr.Update();
+ 
+     // Now the actual m_projectTreePane size is set, give it a reasonable min width
+@@ -344,6 +358,12 @@ KICAD_MANAGER_FRAME::~KICAD_MANAGER_FRAME()
+ {
+     m_wsChildTimer.Stop();
+ 
++    if( m_workspacePane )
++        m_workspacePane->SetDock( nullptr );
++
++    delete m_workspaceDock;
++    m_workspaceDock = nullptr;
++
+     Unbind( wxEVT_CHAR, &TOOL_DISPATCHER::DispatchWxEvent, m_toolDispatcher );
+     Unbind( wxEVT_CHAR_HOOK, &TOOL_DISPATCHER::DispatchWxEvent, m_toolDispatcher );
+ 
+@@ -393,6 +413,22 @@ void KICAD_MANAGER_FRAME::onNotebookPageCloseRequest( wxAuiNotebookEvent& evt )
+     wxAuiNotebook* notebook = (wxAuiNotebook*) evt.GetEventObject();
+     wxWindow*      page = notebook->GetPage( evt.GetSelection() );
+ 
++    // Workspace fork: the close button of a docked editor closes the editor itself; its tab
++    // goes away once the editor is really gone (it may ask to save changes first).
++    if( m_workspaceDock && m_workspaceDock->OwnsPage( page ) )
++    {
++        evt.Veto();
++
++        CallAfter(
++                [this, page]()
++                {
++                    if( m_workspaceDock )
++                        m_workspaceDock->RequestClosePage( page );
++                } );
++
++        return;
++    }
++
+     if( PANEL_NOTEBOOK_BASE* panel = dynamic_cast<PANEL_NOTEBOOK_BASE*>( page ) )
+     {
+         if( panel->GetClosable() )
+@@ -744,6 +780,11 @@ bool KICAD_MANAGER_FRAME::canCloseWindow( wxCloseEvent& aEvent )
+     {
+         // Workspace fork: the editors of the other workspace projects live in helper
+         // processes; ask them to close as well (they prompt for unsaved changes themselves).
++        // Docked frames of helper processes get their title bars back first, so that nothing
++        // is left behind without decorations should a helper stay open.
++        if( m_workspaceDock )
++            m_workspaceDock->ReleaseAll();
++
+         if( m_workspacePane )
+             m_workspacePane->CloseChildren();
+ 
+@@ -1279,6 +1320,9 @@ void KICAD_MANAGER_FRAME::ShowChangedLanguage()
+         m_workspacePane->ShowChangedLanguage();
+     }
+ 
++    if( m_workspaceDock )
++        m_workspaceDock->ShowChangedLanguage();
++
+     m_auimgr.Update();
+ 
+     m_projectTreePane->FileWatcherReset();
+@@ -1442,12 +1486,71 @@ void KICAD_MANAGER_FRAME::OnWorkspaceMenu( wxCommandEvent& aEvent )
+         break;
+     }
+ 
++    case ID_WORKSPACE_TOGGLE_TABS:
++        if( m_workspaceDock )
++        {
++            if( !m_workspaceDock->IsAvailable() )
++            {
++                DisplayInfoMessage( this, _( "Showing editors as tabs is not available on this "
++                                             "display server (it needs Windows or X11)." ) );
++            }
++            else
++            {
++                m_workspaceDock->SetTabbed( !m_workspaceDock->IsTabbed() );
++            }
++
++            ReCreateMenuBar();
++        }
++
++        break;
++
+     default:
+         break;
+     }
+ }
+ 
+ 
++std::vector<WS_WINDOW_INFO> KICAD_MANAGER_FRAME::CollectEditorWindows()
++{
++    // The frames worth a tab; everything else (choosers, viewers, ...) stays a free window.
++    static const FRAME_T types[] = { FRAME_SCH, FRAME_PCB_EDITOR, FRAME_SCH_SYMBOL_EDITOR,
++                                     FRAME_FOOTPRINT_EDITOR, FRAME_SIMULATOR };
++
++    std::vector<WS_WINDOW_INFO> windows;
++    wxString                    proFile = Prj().IsNullProject() ? wxString() : Prj().GetProjectFullName();
++
++    for( FRAME_T type : types )
++    {
++        KIWAY_PLAYER* player = Kiway().Player( type, false );
++
++        if( !player || !player->IsShown() || player->IsModal() )
++            continue;
++
++        WS_WINDOW_INFO info;
++        info.handle = KIPLATFORM::WINDOW_EMBED::GetHandle( player );
++        info.frameType = type;
++        info.title = player->GetTitle();
++        info.proFile = proFile;
++        info.inProcess = true;
++
++        if( info.handle != 0 )
++            windows.push_back( info );
++    }
++
++    return windows;
++}
++
++
++void KICAD_MANAGER_FRAME::CloseEditorWindow( int aFrameType )
++{
++    if( aFrameType < 0 || aFrameType >= KIWAY_PLAYER_COUNT )
++        return;
++
++    if( KIWAY_PLAYER* player = Kiway().Player( static_cast<FRAME_T>( aFrameType ), false ) )
++        player->Close( false );
++}
++
++
+ void KICAD_MANAGER_FRAME::StartWorkspaceChild( const wxString& aOpen, bool aProjectLoaded )
+ {
+     // Never restore the editors that were open in the last session of this project: the
+@@ -1473,7 +1576,7 @@ void KICAD_MANAGER_FRAME::StartWorkspaceChild( const wxString& aOpen, bool aProj
+             {
+                 runWorkspaceChildCommand( aOpen );
+                 m_wsChildStarted = true;
+-                m_wsChildTimer.Start( 400 );
++                m_wsChildTimer.Start( 200 );
+             } );
+ }
+ 
+@@ -1492,9 +1595,20 @@ void KICAD_MANAGER_FRAME::runWorkspaceChildCommand( const wxString& aCommand )
+     m_wsChildBusy = true;
+ 
+     if( aCommand == wxS( "sch" ) )
++    {
+         GetToolManager()->RunAction( KICAD_MANAGER_ACTIONS::editSchematic );
++    }
+     else if( aCommand == wxS( "pcb" ) )
++    {
+         GetToolManager()->RunAction( KICAD_MANAGER_ACTIONS::editPCB );
++    }
++    else if( aCommand.StartsWith( wxS( "close:" ) ) )
++    {
++        long frameType = -1;
++
++        if( aCommand.AfterFirst( ':' ).ToLong( &frameType ) )
++            CloseEditorWindow( static_cast<int>( frameType ) );
++    }
+ 
+     m_wsChildBusy = false;
+ }
+@@ -1502,7 +1616,29 @@ void KICAD_MANAGER_FRAME::runWorkspaceChildCommand( const wxString& aCommand )
+ 
+ void KICAD_MANAGER_FRAME::onWorkspaceChildTimer( wxTimerEvent& aEvent )
+ {
+-    if( m_wsChildBusy || m_isClosing || !m_wsChildStarted )
++    if( m_isClosing || !m_wsChildStarted )
++        return;
++
++    // Publish the editor frames of this process: the workspace manager docks them as tabs
++    // and uses the native handles to bring them to the front.
++    {
++        std::vector<WS_WINDOW_INFO> windows = CollectEditorWindows();
++        std::string                 signature;
++
++        for( const WS_WINDOW_INFO& win : windows )
++        {
++            signature += std::to_string( win.handle ) + "/" + std::to_string( win.frameType ) + "/"
++                         + std::string( win.title.utf8_str() ) + "\n";
++        }
++
++        if( signature != m_wsChildReport || !wxFileExists( WS_WINDOW_INFO::ReportFileName( s_WorkspaceChildDir ) ) )
++        {
++            if( wxDir::Exists( s_WorkspaceChildDir ) && WS_WINDOW_INFO::Write( s_WorkspaceChildDir, windows ) )
++                m_wsChildReport = signature;
++        }
++    }
++
++    if( m_wsChildBusy )
+         return;
+ 
+     int  visibleWindows = 0;
+diff --git a/kicad/kicad_manager_frame.h b/kicad/kicad_manager_frame.h
+index de152f59..9ea055bf 100644
+--- a/kicad/kicad_manager_frame.h
++++ b/kicad/kicad_manager_frame.h
+@@ -28,6 +28,9 @@
+ #include <kiway_player.h>
+ #include <wx/timer.h>
+ 
++#include <string>
++#include <vector>
++
+ class ACTION_TOOLBAR;
+ class BITMAP_BUTTON;
+ class EDA_BASE_FRAME;
+@@ -38,6 +41,8 @@ class PROJECT_TREE;
+ class PROJECT_TREE_PANE;
+ class LOCAL_HISTORY_PANE;
+ class WORKSPACE_PANE;
++class WORKSPACE_DOCK;
++struct WS_WINDOW_INFO;
+ class UPDATE_MANAGER;
+ 
+ /**
+@@ -73,6 +78,13 @@ public:
+     void StartWorkspaceChild( const wxString& aOpen, bool aProjectLoaded );
+ 
+     WORKSPACE_PANE* GetWorkspacePane() const { return m_workspacePane; }
++    WORKSPACE_DOCK* GetWorkspaceDock() const { return m_workspaceDock; }
++
++    /// The visible, non-modal editor frames (schematic, PCB, ...) living in this process.
++    std::vector<WS_WINDOW_INFO> CollectEditorWindows();
++
++    /// Ask the editor frame of the given FRAME_T to close (it prompts for unsaved changes).
++    void CloseEditorWindow( int aFrameType );
+ 
+     void OnWorkspaceMenu( wxCommandEvent& aEvent );
+ 
+@@ -298,6 +310,8 @@ private:
+     bool                  m_wsChildBusy;       ///< an editor is being opened right now
+     bool                  m_wsChildStarted;    ///< the first editor has been requested
+     int                   m_wsChildIdleTicks;  ///< consecutive ticks without any window
++    WORKSPACE_DOCK*       m_workspaceDock;     ///< editor frames as tabs (manager only)
++    std::string           m_wsChildReport;     ///< last published list of editor frames
+ };
+ 
+ 
+diff --git a/kicad/menubar.cpp b/kicad/menubar.cpp
+index e717fe74..8e6b7dde 100644
+--- a/kicad/menubar.cpp
++++ b/kicad/menubar.cpp
+@@ -42,6 +42,7 @@
+ #include "kicad_manager_frame.h"
+ #include "pgm_kicad.h"
+ #include "kicad_id.h"
++#include "workspace_dock.h"
+ #include <widgets/wx_menubar.h>
+ #include <wx/dir.h>
+ #include <wx/utils.h>
+@@ -120,6 +121,14 @@ void KICAD_MANAGER_FRAME::doReCreateMenuBar()
+                         _( "Show or hide the workspace pane" ),
+                         ID_WORKSPACE_TOGGLE_PANE, BITMAPS::directory );
+ 
++    wxMenuItem* tabsItem = workspaceMenu->Add( _( "Show Editors as Tabs" ),
++                                               _( "Dock the editor windows of all workspace projects as "
++                                                  "tabs into this window" ),
++                                               ID_WORKSPACE_TOGGLE_TABS, BITMAPS::INVALID_BITMAP, true );
++
++    if( m_workspaceDock && m_workspaceDock->IsTabbed() )
++        tabsItem->Check( true );
++
+     fileMenu->AppendSeparator();
+     fileMenu->Add( workspaceMenu );
+ 
+diff --git a/kicad/workspace.cpp b/kicad/workspace.cpp
+index a3b5bfbd..cd162cd1 100644
+--- a/kicad/workspace.cpp
++++ b/kicad/workspace.cpp
+@@ -423,17 +423,34 @@ static wxString stateFileName()
+ }
+ 
+ 
+-wxString WORKSPACE::LoadLastUsed()
++/// Read the state document, an empty object if there is none (yet).
++static nlohmann::json readState()
+ {
+     std::string content;
+ 
+-    if( !readTextFile( stateFileName(), content ) )
+-        return wxEmptyString;
++    if( readTextFile( stateFileName(), content ) )
++    {
++        try
++        {
++            nlohmann::json j = nlohmann::json::parse( content );
+ 
++            if( j.is_object() )
++                return j;
++        }
++        catch( const std::exception& )
++        {
++        }
++    }
++
++    return nlohmann::json::object();
++}
++
++
++wxString WORKSPACE::LoadLastUsed()
++{
+     try
+     {
+-        nlohmann::json j = nlohmann::json::parse( content );
+-        return wxString::FromUTF8( j.value( "last_workspace", std::string() ) );
++        return wxString::FromUTF8( readState().value( "last_workspace", std::string() ) );
+     }
+     catch( const std::exception& )
+     {
+@@ -444,7 +461,28 @@ wxString WORKSPACE::LoadLastUsed()
+ 
+ void WORKSPACE::SaveLastUsed( const wxString& aFileName )
+ {
+-    nlohmann::json j;
++    nlohmann::json j = readState();
+     j["last_workspace"] = std::string( aFileName.utf8_str() );
+     writeTextFile( stateFileName(), j.dump( 2 ) + "\n" );
+ }
++
++
++bool WORKSPACE::LoadOption( const char* aKey, bool aDefault )
++{
++    try
++    {
++        return readState().value( aKey, aDefault );
++    }
++    catch( const std::exception& )
++    {
++        return aDefault;
++    }
++}
++
++
++void WORKSPACE::SaveOption( const char* aKey, bool aValue )
++{
++    nlohmann::json j = readState();
++    j[aKey] = aValue;
++    writeTextFile( stateFileName(), j.dump( 2 ) + "\n" );
++}
+diff --git a/kicad/workspace.h b/kicad/workspace.h
+index a6182a05..0cd1d5a8 100644
+--- a/kicad/workspace.h
++++ b/kicad/workspace.h
+@@ -114,6 +114,10 @@ public:
+     static wxString LoadLastUsed();
+     static void     SaveLastUsed( const wxString& aFileName );
+ 
++    /// Simple persistent on/off settings of the workspace features (workspace_state.json).
++    static bool LoadOption( const char* aKey, bool aDefault );
++    static void SaveOption( const char* aKey, bool aValue );
++
+ private:
+     wxString              m_fileName;
+     std::vector<wxString> m_projects;
+diff --git a/kicad/workspace_dock.cpp b/kicad/workspace_dock.cpp
+new file mode 100644
+index 00000000..c9587b26
+--- /dev/null
++++ b/kicad/workspace_dock.cpp
+@@ -0,0 +1,827 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork (multi-project manager with network lock overview).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "workspace_dock.h"
++
++#include <algorithm>
++#include <functional>
++#include <string>
++
++#include <wx/aui/auibook.h>
++#include <wx/ffile.h>
++#include <wx/filename.h>
++#include <wx/log.h>
++#include <wx/menu.h>
++#include <wx/panel.h>
++
++#include <bitmaps.h>
++#include <frame_type.h>
++#include <json_common.h>
++#include <kiplatform/window_embed.h>
++
++#include "kicad_manager_frame.h"
++#include "workspace.h"
++#include "workspace_pane.h"
++
++using namespace KIPLATFORM;
++
++
++/// Milliseconds between two looks at the open editor frames.
++static const int DOCK_TIMER_MS = 150;
++
++/// Every that many timer ticks the geometry of the visible frames is applied again, in case a
++/// window manager ignored or reverted an earlier request.
++static const int DOCK_REAPPLY_TICKS = 14;
++
++/// Give up waiting for a frame that was requested to open after that many ticks (about 90 s).
++static const int DOCK_PENDING_TICKS = 600;
++
++
++// ---------------------------------------------------------------------------------------------
++// WS_WINDOW_INFO: the list a helper process publishes
++// ---------------------------------------------------------------------------------------------
++
++wxString WS_WINDOW_INFO::ReportFileName( const wxString& aCommandDir )
++{
++    return aCommandDir + wxFileName::GetPathSeparator() + wxS( "windows.json" );
++}
++
++
++bool WS_WINDOW_INFO::Write( const wxString& aCommandDir, const std::vector<WS_WINDOW_INFO>& aWindows )
++{
++    nlohmann::json j;
++    j["windows"] = nlohmann::json::array();
++
++    for( const WS_WINDOW_INFO& win : aWindows )
++    {
++        nlohmann::json entry;
++        entry["handle"] = win.handle;
++        entry["type"] = win.frameType;
++        entry["title"] = std::string( win.title.utf8_str() );
++        j["windows"].push_back( entry );
++    }
++
++    std::string text = j.dump();
++    wxString    target = ReportFileName( aCommandDir );
++    wxString    temp = target + wxS( ".tmp" );
++    wxLogNull   noLog;
++
++    {
++        wxFFile file( temp, wxS( "wb" ) );
++
++        if( !file.IsOpened() )
++            return false;
++
++        if( file.Write( text.data(), text.size() ) != text.size() )
++            return false;
++
++        file.Close();
++    }
++
++    // Rename so that the reader only ever sees complete files
++    return wxRenameFile( temp, target, true );
++}
++
++
++bool WS_WINDOW_INFO::Read( const wxString& aCommandDir, std::vector<WS_WINDOW_INFO>& aWindows )
++{
++    wxString  name = ReportFileName( aCommandDir );
++    wxLogNull noLog;
++
++    if( !wxFileName::FileExists( name ) )
++        return false;
++
++    wxFFile file( name, wxS( "rb" ) );
++
++    if( !file.IsOpened() )
++        return false;
++
++    wxFileOffset len = file.Length();
++
++    if( len <= 0 || len > 1024 * 1024 )
++        return false;
++
++    std::string text( static_cast<size_t>( len ), '\0' );
++
++    if( file.Read( text.data(), text.size() ) != text.size() )
++        return false;
++
++    try
++    {
++        nlohmann::json j = nlohmann::json::parse( text );
++
++        for( const nlohmann::json& entry : j.at( "windows" ) )
++        {
++            WS_WINDOW_INFO win;
++            win.handle = entry.value( "handle", 0ULL );
++            win.frameType = entry.value( "type", -1 );
++            win.title = wxString::FromUTF8( entry.value( "title", std::string() ) );
++
++            if( win.handle != 0 )
++                aWindows.push_back( win );
++        }
++    }
++    catch( const std::exception& )
++    {
++        return false;
++    }
++
++    return true;
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Placeholder page
++// ---------------------------------------------------------------------------------------------
++
++class WS_DOC_PAGE : public wxPanel
++{
++public:
++    WS_DOC_PAGE( wxWindow* aParent, const WS_WINDOW_INFO& aInfo ) :
++            wxPanel( aParent, wxID_ANY ),
++            m_info( aInfo ),
++            m_shown( -1 )
++    {
++    }
++
++    WS_WINDOW_INFO m_info;
++    wxRect         m_lastRect;
++    int            m_shown;     ///< -1 unknown, 0 hidden, 1 shown
++};
++
++
++// ---------------------------------------------------------------------------------------------
++// WORKSPACE_DOCK
++// ---------------------------------------------------------------------------------------------
++
++WORKSPACE_DOCK::WORKSPACE_DOCK( KICAD_MANAGER_FRAME* aFrame, wxAuiNotebook* aNotebook,
++                                WORKSPACE_PANE* aPane ) :
++        m_frame( aFrame ),
++        m_notebook( aNotebook ),
++        m_pane( aPane ),
++        m_timer( this ),
++        m_tabbed( false ),
++        m_inRefresh( false ),
++        m_pendingFrameType( -1 ),
++        m_pendingTicks( 0 )
++{
++    m_tabbed = IsAvailable() && WORKSPACE::LoadOption( "editor_tabs", true );
++
++    Bind( wxEVT_TIMER, &WORKSPACE_DOCK::onTimer, this, m_timer.GetId() );
++
++    m_notebook->Bind( wxEVT_AUINOTEBOOK_PAGE_CHANGED, &WORKSPACE_DOCK::onPageChanged, this );
++    m_notebook->Bind( wxEVT_AUINOTEBOOK_TAB_RIGHT_UP, &WORKSPACE_DOCK::onTabRightUp, this );
++    m_frame->Bind( wxEVT_MOVE, &WORKSPACE_DOCK::onFrameMove, this );
++
++    m_timer.Start( DOCK_TIMER_MS );
++}
++
++
++WORKSPACE_DOCK::~WORKSPACE_DOCK()
++{
++    m_timer.Stop();
++
++    m_notebook->Unbind( wxEVT_AUINOTEBOOK_PAGE_CHANGED, &WORKSPACE_DOCK::onPageChanged, this );
++    m_notebook->Unbind( wxEVT_AUINOTEBOOK_TAB_RIGHT_UP, &WORKSPACE_DOCK::onTabRightUp, this );
++    m_frame->Unbind( wxEVT_MOVE, &WORKSPACE_DOCK::onFrameMove, this );
++
++    // Never leave a frame of a helper process behind without title bar
++    for( WS_DOC_PAGE* page : m_pages )
++        WINDOW_EMBED::Detach( page->m_info.handle );
++}
++
++
++bool WORKSPACE_DOCK::IsAvailable() const
++{
++    return WINDOW_EMBED::IsSupported();
++}
++
++
++void WORKSPACE_DOCK::SetTabbed( bool aTabbed )
++{
++    aTabbed = aTabbed && IsAvailable();
++
++    if( aTabbed == m_tabbed )
++        return;
++
++    m_tabbed = aTabbed;
++    WORKSPACE::SaveOption( "editor_tabs", m_tabbed );
++    m_floating.clear();
++
++    if( !m_tabbed )
++    {
++        std::vector<WS_DOC_PAGE*> pages = m_pages;
++
++        for( WS_DOC_PAGE* page : pages )
++            removePage( page, true );
++    }
++
++    refreshWindows();
++    Sync();
++}
++
++
++void WORKSPACE_DOCK::ReleaseAll()
++{
++    m_timer.Stop();
++
++    std::vector<WS_DOC_PAGE*> pages = m_pages;
++
++    for( WS_DOC_PAGE* page : pages )
++        removePage( page, true );
++}
++
++
++bool WORKSPACE_DOCK::OwnsPage( wxWindow* aPage ) const
++{
++    for( WS_DOC_PAGE* page : m_pages )
++    {
++        if( page == aPage )
++            return true;
++    }
++
++    return false;
++}
++
++
++void WORKSPACE_DOCK::RequestClosePage( wxWindow* aPage )
++{
++    if( !OwnsPage( aPage ) )
++        return;
++
++    WS_DOC_PAGE* page = static_cast<WS_DOC_PAGE*>( aPage );
++
++    // Closing may ask to save changes, so the frame has to be visible and in front
++    selectPage( page );
++
++    if( page->m_info.inProcess )
++        m_frame->CloseEditorWindow( page->m_info.frameType );
++    else
++        m_pane->SendChildCommand( page->m_info.proFile, wxString::Format( wxS( "close:%d" ), page->m_info.frameType ) );
++}
++
++
++void WORKSPACE_DOCK::ShowChangedLanguage()
++{
++    for( WS_DOC_PAGE* page : m_pages )
++        updateLabel( page );
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Tracking the open editor frames
++// ---------------------------------------------------------------------------------------------
++
++std::vector<WS_WINDOW_INFO> WORKSPACE_DOCK::collect() const
++{
++    // Editors of the active project live in this process ...
++    std::vector<WS_WINDOW_INFO> all = m_frame->CollectEditorWindows();
++
++    // ... those of the other workspace projects in helper processes, which publish their frames.
++    for( const auto& [proFile, commandDir] : m_pane->GetChildDirs() )
++    {
++        std::vector<WS_WINDOW_INFO> windows;
++
++        if( !WS_WINDOW_INFO::Read( commandDir, windows ) )
++            continue;
++
++        for( WS_WINDOW_INFO& win : windows )
++        {
++            win.proFile = proFile;
++            win.inProcess = false;
++            all.push_back( win );
++        }
++    }
++
++    return all;
++}
++
++
++void WORKSPACE_DOCK::refreshWindows()
++{
++    if( m_inRefresh )
++        return;
++
++    m_inRefresh = true;
++
++    std::map<unsigned long long, WS_WINDOW_INFO> now;
++
++    for( const WS_WINDOW_INFO& win : collect() )
++    {
++        if( win.handle != 0 && WINDOW_EMBED::IsAlive( win.handle ) )
++            now[win.handle] = win;
++    }
++
++    // Frames that were closed
++    std::vector<WS_DOC_PAGE*> pages = m_pages;
++
++    for( WS_DOC_PAGE* page : pages )
++    {
++        if( !now.count( page->m_info.handle ) )
++            removePage( page, false );
++    }
++
++    for( auto it = m_floating.begin(); it != m_floating.end(); )
++    {
++        if( now.count( *it ) )
++            ++it;
++        else
++            it = m_floating.erase( it );
++    }
++
++    // New frames and changed titles
++    for( const auto& [handle, win] : now )
++    {
++        if( WS_DOC_PAGE* page = findPage( handle ) )
++        {
++            if( page->m_info.title != win.title )
++            {
++                page->m_info.title = win.title;
++                updateLabel( page );
++            }
++        }
++        else if( m_tabbed && !m_floating.count( handle ) )
++        {
++            // A frame that just opened is what the user wants to see
++            addPage( win, true );
++        }
++    }
++
++    m_known = now;
++
++    if( !m_pendingProFile.IsEmpty() )
++    {
++        wxString proFile = m_pendingProFile;
++        int      frameType = m_pendingFrameType;
++
++        if( Activate( proFile, frameType ) || ++m_pendingTicks > DOCK_PENDING_TICKS )
++        {
++            m_pendingProFile.clear();
++            m_pendingTicks = 0;
++        }
++    }
++
++    m_inRefresh = false;
++}
++
++
++WS_DOC_PAGE* WORKSPACE_DOCK::findPage( unsigned long long aHandle ) const
++{
++    for( WS_DOC_PAGE* page : m_pages )
++    {
++        if( page->m_info.handle == aHandle )
++            return page;
++    }
++
++    return nullptr;
++}
++
++
++static bool sameProject( const wxString& aLeft, const wxString& aRight )
++{
++    if( aLeft == aRight )
++        return true;
++
++    if( aLeft.IsEmpty() || aRight.IsEmpty() )
++        return false;
++
++    return wxFileName( aLeft ).SameAs( wxFileName( aRight ) );
++}
++
++
++WS_DOC_PAGE* WORKSPACE_DOCK::findPage( const wxString& aProFile, int aFrameType ) const
++{
++    for( WS_DOC_PAGE* page : m_pages )
++    {
++        if( page->m_info.frameType == aFrameType && sameProject( page->m_info.proFile, aProFile ) )
++            return page;
++    }
++
++    return nullptr;
++}
++
++
++bool WORKSPACE_DOCK::Activate( const wxString& aProFile, int aFrameType )
++{
++    if( WS_DOC_PAGE* page = findPage( aProFile, aFrameType ) )
++    {
++        selectPage( page );
++        return true;
++    }
++
++    // Free floating frames (tabs switched off, or undocked by the user)
++    for( const auto& [handle, win] : m_known )
++    {
++        if( win.frameType == aFrameType && sameProject( win.proFile, aProFile ) )
++        {
++            WINDOW_EMBED::Activate( handle, m_frame );
++            return true;
++        }
++    }
++
++    return false;
++}
++
++
++void WORKSPACE_DOCK::ActivateWhenOpened( const wxString& aProFile, int aFrameType )
++{
++    m_pendingProFile = aProFile;
++    m_pendingFrameType = aFrameType;
++    m_pendingTicks = 0;
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Pages
++// ---------------------------------------------------------------------------------------------
++
++wxString WORKSPACE_DOCK::labelFor( const WS_WINDOW_INFO& aInfo ) const
++{
++    wxString kind;
++
++    switch( aInfo.frameType )
++    {
++    case FRAME_SCH:               kind = _( "Schematic" );        break;
++    case FRAME_PCB_EDITOR:        kind = _( "PCB" );              break;
++    case FRAME_SCH_SYMBOL_EDITOR: kind = _( "Symbol Editor" );    break;
++    case FRAME_FOOTPRINT_EDITOR:  kind = _( "Footprint Editor" ); break;
++    case FRAME_SIMULATOR:         kind = _( "Simulator" );        break;
++    default:                      kind = _( "Editor" );           break;
++    }
++
++    wxString label = wxFileName( aInfo.proFile ).GetName();
++
++    if( label.IsEmpty() )
++        label = kind;
++    else
++        label += wxS( " – " ) + kind;
++
++    // KiCad marks unsaved changes with a leading asterisk in the frame title
++    if( aInfo.title.StartsWith( wxS( "*" ) ) )
++        label = wxS( "*" ) + label;
++
++    return label;
++}
++
++
++static BITMAPS bitmapFor( int aFrameType )
++{
++    switch( aFrameType )
++    {
++    case FRAME_SCH:               return BITMAPS::icon_eeschema_24;
++    case FRAME_PCB_EDITOR:        return BITMAPS::icon_pcbnew_24;
++    case FRAME_SCH_SYMBOL_EDITOR: return BITMAPS::icon_libedit_24;
++    case FRAME_FOOTPRINT_EDITOR:  return BITMAPS::icon_modedit_24;
++    default:                      return BITMAPS::icon_eeschema_24;
++    }
++}
++
++
++void WORKSPACE_DOCK::addPage( const WS_WINDOW_INFO& aInfo, bool aSelect )
++{
++    WINDOW_EMBED::Attach( aInfo.handle, m_frame );
++
++    WS_DOC_PAGE* page = new WS_DOC_PAGE( m_notebook, aInfo );
++    m_pages.push_back( page );
++
++    page->Bind( wxEVT_SIZE,
++                [this]( wxSizeEvent& aEvent )
++                {
++                    aEvent.Skip();
++
++                    // Let the notebook finish its layout before reading screen positions
++                    CallAfter(
++                            [this]()
++                            {
++                                Sync();
++                            } );
++                } );
++
++    m_notebook->AddPage( page, labelFor( aInfo ), false, KiBitmapBundleDef( bitmapFor( aInfo.frameType ), 16 ) );
++    m_notebook->SetPageToolTip( m_notebook->GetPageIndex( page ), aInfo.title );
++    m_frame->HideTabsIfNeeded();
++
++    if( aSelect )
++        selectPage( page );
++    else
++        Sync();
++}
++
++
++void WORKSPACE_DOCK::removePage( WS_DOC_PAGE* aPage, bool aDetach )
++{
++    auto it = std::find( m_pages.begin(), m_pages.end(), aPage );
++
++    if( it == m_pages.end() )
++        return;
++
++    m_pages.erase( it );
++
++    if( aDetach )
++        WINDOW_EMBED::Detach( aPage->m_info.handle );
++
++    int index = m_notebook->GetPageIndex( aPage );
++
++    if( index != wxNOT_FOUND )
++        m_notebook->DeletePage( index );
++
++    m_frame->HideTabsIfNeeded();
++}
++
++
++void WORKSPACE_DOCK::updateLabel( WS_DOC_PAGE* aPage )
++{
++    int index = m_notebook->GetPageIndex( aPage );
++
++    if( index == wxNOT_FOUND )
++        return;
++
++    wxString label = labelFor( aPage->m_info );
++
++    if( m_notebook->GetPageText( index ) != label )
++        m_notebook->SetPageText( index, label );
++
++    m_notebook->SetPageToolTip( index, aPage->m_info.title );
++}
++
++
++void WORKSPACE_DOCK::selectPage( WS_DOC_PAGE* aPage )
++{
++    int index = m_notebook->GetPageIndex( aPage );
++
++    if( index == wxNOT_FOUND )
++        return;
++
++    if( m_notebook->GetSelection() != index )
++        m_notebook->SetSelection( index );
++
++    Sync();
++    WINDOW_EMBED::Activate( aPage->m_info.handle, m_frame );
++}
++
++
++void WORKSPACE_DOCK::detachPage( WS_DOC_PAGE* aPage )
++{
++    m_floating.insert( aPage->m_info.handle );
++    removePage( aPage, true );
++}
++
++
++void WORKSPACE_DOCK::splitPage( wxWindow* aWindow, int aDirection )
++{
++    int index = m_notebook->GetPageIndex( aWindow );
++
++    if( index == wxNOT_FOUND )
++        return;
++
++    // The page that stays behind should keep showing what it showed before the split
++    wxWindow* previous = m_notebook->GetCurrentPage();
++
++    if( previous == aWindow )
++        previous = nullptr;
++
++    m_notebook->Split( index, aDirection );
++
++    if( previous )
++    {
++        int previousIndex = m_notebook->GetPageIndex( previous );
++
++        if( previousIndex != wxNOT_FOUND )
++            m_notebook->SetSelection( previousIndex );
++    }
++
++    index = m_notebook->GetPageIndex( aWindow );
++
++    if( index != wxNOT_FOUND )
++        m_notebook->SetSelection( index );
++
++    Sync();
++}
++
++
++void WORKSPACE_DOCK::unsplit()
++{
++    // wxAuiNotebook (3.2) has no call to merge its tab controls again; removing all pages and
++    // adding them back puts them into a single tab control.
++    struct ENTRY
++    {
++        wxWindow*      window;
++        wxString       text;
++        wxString       tip;
++        wxBitmapBundle bitmap;
++    };
++
++    std::vector<ENTRY> entries;
++    wxWindow*          selected = m_notebook->GetCurrentPage();
++
++    for( size_t i = 0; i < m_notebook->GetPageCount(); i++ )
++    {
++        ENTRY entry;
++        entry.window = m_notebook->GetPage( i );
++        entry.text = m_notebook->GetPageText( i );
++        entry.tip = m_notebook->GetPageToolTip( i );
++        entry.bitmap = wxBitmapBundle( m_notebook->GetPageBitmap( i ) );
++        entries.push_back( entry );
++    }
++
++    if( entries.size() < 2 )
++        return;
++
++    m_inRefresh = true;     // no page bookkeeping while the notebook is taken apart
++    m_notebook->Freeze();
++
++    while( m_notebook->GetPageCount() > 0 )
++        m_notebook->RemovePage( 0 );
++
++    for( const ENTRY& entry : entries )
++    {
++        m_notebook->AddPage( entry.window, entry.text, false, entry.bitmap );
++
++        if( !entry.tip.IsEmpty() )
++            m_notebook->SetPageToolTip( m_notebook->GetPageCount() - 1, entry.tip );
++    }
++
++    int index = selected ? m_notebook->GetPageIndex( selected ) : 0;
++    m_notebook->SetSelection( index == wxNOT_FOUND ? 0 : index );
++
++    m_notebook->Thaw();
++    m_inRefresh = false;
++
++    m_frame->HideTabsIfNeeded();
++    Sync();
++}
++
++
++// ---------------------------------------------------------------------------------------------
++// Keeping the frames over their pages
++// ---------------------------------------------------------------------------------------------
++
++void WORKSPACE_DOCK::Sync()
++{
++    if( m_pages.empty() )
++        return;
++
++    // A minimized manager takes its docked frames along (owner / transient relation)
++    if( m_frame->IsIconized() )
++        return;
++
++    for( WS_DOC_PAGE* page : m_pages )
++    {
++        bool visible = m_tabbed && m_frame->IsShown() && page->IsShownOnScreen();
++
++        if( visible )
++        {
++            wxRect rect( page->GetScreenPosition(), page->GetSize() );
++
++            if( rect.width < 20 || rect.height < 20 )
++                continue;
++
++            if( rect != page->m_lastRect || page->m_shown != 1 )
++            {
++                WINDOW_EMBED::SetGeometry( page->m_info.handle, m_frame, rect );
++                page->m_lastRect = rect;
++            }
++
++            if( page->m_shown != 1 )
++            {
++                WINDOW_EMBED::Show( page->m_info.handle, true );
++                page->m_shown = 1;
++            }
++        }
++        else if( page->m_shown != 0 )
++        {
++            WINDOW_EMBED::Show( page->m_info.handle, false );
++            page->m_shown = 0;
++        }
++    }
++}
++
++
++void WORKSPACE_DOCK::onTimer( wxTimerEvent& aEvent )
++{
++    static int tick = 0;
++
++    refreshWindows();
++
++    if( ++tick % DOCK_REAPPLY_TICKS == 0 )
++    {
++        // Apply the geometry of the visible frames again
++        for( WS_DOC_PAGE* page : m_pages )
++            page->m_lastRect = wxRect();
++    }
++
++    Sync();
++}
++
++
++void WORKSPACE_DOCK::onFrameMove( wxMoveEvent& aEvent )
++{
++    aEvent.Skip();
++    Sync();
++}
++
++
++void WORKSPACE_DOCK::onPageChanged( wxAuiNotebookEvent& aEvent )
++{
++    aEvent.Skip();
++
++    if( m_inRefresh && m_pages.empty() )
++        return;
++
++    CallAfter(
++            [this]()
++            {
++                Sync();
++
++                // Typing should go to the editor whose tab was just selected
++                wxWindow* current = m_notebook->GetCurrentPage();
++
++                if( OwnsPage( current ) )
++                    WINDOW_EMBED::Activate( static_cast<WS_DOC_PAGE*>( current )->m_info.handle, m_frame );
++            } );
++}
++
++
++void WORKSPACE_DOCK::onTabRightUp( wxAuiNotebookEvent& aEvent )
++{
++    int index = aEvent.GetSelection();
++
++    if( index < 0 || index >= (int) m_notebook->GetPageCount() )
++    {
++        aEvent.Skip();
++        return;
++    }
++
++    wxWindow* window = m_notebook->GetPage( index );
++    bool      isDoc = OwnsPage( window );
++
++    wxMenu menu;
++
++    auto add = [&]( const wxString& aLabel, bool aEnable, std::function<void()> aHandler )
++    {
++        wxMenuItem* item = menu.Append( wxID_ANY, aLabel );
++        item->Enable( aEnable );
++        menu.Bind( wxEVT_MENU,
++                   [aHandler]( wxCommandEvent& )
++                   {
++                       aHandler();
++                   },
++                   item->GetId() );
++    };
++
++    bool canSplit = m_notebook->GetPageCount() > 1;
++
++    add( _( "Show Beside (Split Right)" ), canSplit,
++         [this, window]()
++         {
++             splitPage( window, wxRIGHT );
++         } );
++
++    add( _( "Show Below (Split Down)" ), canSplit,
++         [this, window]()
++         {
++             splitPage( window, wxBOTTOM );
++         } );
++
++    add( _( "Remove Split" ), canSplit,
++         [this]()
++         {
++             unsplit();
++         } );
++
++    if( isDoc )
++    {
++        menu.AppendSeparator();
++
++        add( _( "Undock as Separate Window" ), true,
++             [this, window]()
++             {
++                 if( OwnsPage( window ) )
++                     detachPage( static_cast<WS_DOC_PAGE*>( window ) );
++             } );
++
++        add( _( "Close Editor" ), true,
++             [this, window]()
++             {
++                 RequestClosePage( window );
++             } );
++    }
++
++    m_notebook->PopupMenu( &menu );
++}
+diff --git a/kicad/workspace_dock.h b/kicad/workspace_dock.h
+new file mode 100644
+index 00000000..b87b1155
+--- /dev/null
++++ b/kicad/workspace_dock.h
+@@ -0,0 +1,145 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork (multi-project manager with network lock overview).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef KICAD_WORKSPACE_DOCK_H
++#define KICAD_WORKSPACE_DOCK_H
++
++#include <map>
++#include <set>
++#include <vector>
++
++#include <wx/event.h>
++#include <wx/string.h>
++#include <wx/timer.h>
++
++class KICAD_MANAGER_FRAME;
++class WORKSPACE_PANE;
++class WS_DOC_PAGE;
++class wxAuiNotebook;
++class wxAuiNotebookEvent;
++class wxWindow;
++
++
++/**
++ * One editor frame (schematic editor, PCB editor, ...) of this process or of a workspace
++ * helper process.
++ */
++struct WS_WINDOW_INFO
++{
++    unsigned long long handle = 0;      ///< native window handle (HWND / X11 window id)
++    int                frameType = -1;  ///< FRAME_T
++    wxString           title;
++    wxString           proFile;         ///< project the frame belongs to
++    bool               inProcess = false;
++
++    /// File name used by helper processes to publish their editor frames.
++    static wxString ReportFileName( const wxString& aCommandDir );
++
++    static bool Write( const wxString& aCommandDir, const std::vector<WS_WINDOW_INFO>& aWindows );
++    static bool Read( const wxString& aCommandDir, std::vector<WS_WINDOW_INFO>& aWindows );
++};
++
++
++/**
++ * Shows the editor frames of all workspace projects as tabs of the project manager.
++ *
++ * Each docked frame gets a placeholder page in the manager's notebook.  The frame itself stays
++ * a real top level window (see KIPLATFORM::WINDOW_EMBED); it is stripped of its decorations and
++ * kept exactly over its placeholder page whenever that page is visible, and hidden otherwise.
++ * Splitting the notebook (two tabs side by side) therefore shows two editors side by side.
++ *
++ * With tabs switched off (or where docking is not supported) the class still knows all editor
++ * frames and is used to bring an already open one to the front reliably.
++ */
++class WORKSPACE_DOCK : public wxEvtHandler
++{
++public:
++    WORKSPACE_DOCK( KICAD_MANAGER_FRAME* aFrame, wxAuiNotebook* aNotebook, WORKSPACE_PANE* aPane );
++    ~WORKSPACE_DOCK() override;
++
++    /// Can frames be docked on this platform / display server?
++    bool IsAvailable() const;
++
++    bool IsTabbed() const { return m_tabbed; }
++    void SetTabbed( bool aTabbed );
++
++    /**
++     * Bring the editor of the given kind of the given project to the front.
++     *
++     * @return false if no such editor frame is open (the caller then opens it).
++     */
++    bool Activate( const wxString& aProFile, int aFrameType );
++
++    /// Bring the frame to the front as soon as it shows up (it is being opened right now).
++    void ActivateWhenOpened( const wxString& aProFile, int aFrameType );
++
++    /// Give all docked frames back their decorations; call before the manager goes away.
++    void ReleaseAll();
++
++    /// Is \a aPage one of the placeholder pages?
++    bool OwnsPage( wxWindow* aPage ) const;
++
++    /// The user clicked the close button of a placeholder page.
++    void RequestClosePage( wxWindow* aPage );
++
++    /// Re-apply position and visibility of all docked frames now.
++    void Sync();
++
++    /// Refresh translated tab labels.
++    void ShowChangedLanguage();
++
++private:
++    void onTimer( wxTimerEvent& aEvent );
++    void onPageChanged( wxAuiNotebookEvent& aEvent );
++    void onTabRightUp( wxAuiNotebookEvent& aEvent );
++    void onFrameMove( wxMoveEvent& aEvent );
++
++    void refreshWindows();
++    std::vector<WS_WINDOW_INFO> collect() const;
++
++    WS_DOC_PAGE* findPage( unsigned long long aHandle ) const;
++    WS_DOC_PAGE* findPage( const wxString& aProFile, int aFrameType ) const;
++    void         addPage( const WS_WINDOW_INFO& aInfo, bool aSelect );
++    void         removePage( WS_DOC_PAGE* aPage, bool aDetach );
++    void         updateLabel( WS_DOC_PAGE* aPage );
++    void         selectPage( WS_DOC_PAGE* aPage );
++    void         detachPage( WS_DOC_PAGE* aPage );
++    void         unsplit();
++    void         splitPage( wxWindow* aWindow, int aDirection );
++
++    wxString labelFor( const WS_WINDOW_INFO& aInfo ) const;
++
++private:
++    KICAD_MANAGER_FRAME* m_frame;
++    wxAuiNotebook*       m_notebook;
++    WORKSPACE_PANE*      m_pane;
++    wxTimer              m_timer;
++    bool                 m_tabbed;
++    bool                 m_inRefresh;
++
++    std::vector<WS_DOC_PAGE*>                     m_pages;
++    std::map<unsigned long long, WS_WINDOW_INFO>  m_known;     ///< all editor frames seen last
++    std::set<unsigned long long>                  m_floating;  ///< frames the user undocked
++
++    wxString m_pendingProFile;      ///< frame to activate as soon as it appears
++    int      m_pendingFrameType;
++    int      m_pendingTicks;
++};
++
++#endif // KICAD_WORKSPACE_DOCK_H
+diff --git a/kicad/workspace_pane.cpp b/kicad/workspace_pane.cpp
+index 2c7322d7..473b4a3c 100644
+--- a/kicad/workspace_pane.cpp
++++ b/kicad/workspace_pane.cpp
+@@ -48,8 +48,11 @@
+ #include <tool/tool_manager.h>
+ #include <wildcards_and_files_ext.h>
+ 
++#include <frame_type.h>
++
+ #include "kicad_manager_frame.h"
+ #include "tools/kicad_manager_actions.h"
++#include "workspace_dock.h"
+ 
+ 
+ /// Seconds between two scans of the workspace projects.
+@@ -123,7 +126,8 @@ WORKSPACE_PANE::WORKSPACE_PANE( KICAD_MANAGER_FRAME* aParent ) :
+         m_scanRequested( true ),
+         m_firstScanDone( false ),
+         m_ticksSinceScan( 0 ),
+-        m_childCounter( 0 )
++        m_childCounter( 0 ),
++        m_dock( nullptr )
+ {
+     buildUi();
+     loadInitialWorkspace();
+@@ -1041,6 +1045,28 @@ void WORKSPACE_PANE::CloseChildren()
+ }
+ 
+ 
++std::vector<std::pair<wxString, wxString>> WORKSPACE_PANE::GetChildDirs() const
++{
++    std::vector<std::pair<wxString, wxString>> dirs;
++
++    for( const auto& [proFile, child] : m_children )
++        dirs.emplace_back( proFile, child.cmdDir );
++
++    return dirs;
++}
++
++
++bool WORKSPACE_PANE::SendChildCommand( const wxString& aProFile, const wxString& aCommand )
++{
++    auto it = m_children.find( aProFile );
++
++    if( it == m_children.end() )
++        return false;
++
++    return sendCommand( it->second, aCommand );
++}
++
++
+ void WORKSPACE_PANE::setActiveProject( const wxString& aProFile )
+ {
+     if( HasRunningChild( aProFile ) )
+@@ -1062,6 +1088,18 @@ void WORKSPACE_PANE::openInProject( const wxString& aProFile, OPEN_WHAT aWhat )
+         return;
+     }
+ 
++    int frameType = aWhat == OPEN_WHAT::SCHEMATIC ? FRAME_SCH : FRAME_PCB_EDITOR;
++
++    // Already open: bring it to the front right away.  This is done by the manager itself
++    // through the native window handle, because a helper process is not allowed to push its
++    // own window in front of the window the user is working in.
++    if( m_dock && m_dock->Activate( aProFile, frameType ) )
++        return;
++
++    // Not open yet: open it below and bring it to the front as soon as it shows up.
++    if( m_dock )
++        m_dock->ActivateWhenOpened( aProFile, frameType );
++
+     // The active project of this window is edited in-process, exactly like in stock KiCad.
+     if( isActiveProject( aProFile ) )
+     {
+diff --git a/kicad/workspace_pane.h b/kicad/workspace_pane.h
+index 41100415..3228c15f 100644
+--- a/kicad/workspace_pane.h
++++ b/kicad/workspace_pane.h
+@@ -33,6 +33,7 @@
+ 
+ class KICAD_MANAGER_FRAME;
+ class WS_CHILD_PROCESS;
++class WORKSPACE_DOCK;
+ class wxListBox;
+ class wxStaticText;
+ 
+@@ -69,6 +70,15 @@ public:
+     /// Ask all helper processes to close (they prompt for unsaved changes themselves).
+     void CloseChildren();
+ 
++    /// Project file and command folder of every running helper process.
++    std::vector<std::pair<wxString, wxString>> GetChildDirs() const;
++
++    /// Send a command ("sch", "pcb", "close:<frame type>", "quit") to the helper of a project.
++    bool SendChildCommand( const wxString& aProFile, const wxString& aCommand );
++
++    /// The dock shows editor frames as tabs and brings open ones to the front.
++    void SetDock( WORKSPACE_DOCK* aDock ) { m_dock = aDock; }
++
+     /// Trigger a rescan of files and locks as soon as possible.
+     void RequestScan() { m_scanRequested = true; }
+ 
+@@ -147,6 +157,7 @@ private:
+     std::map<wxString, CHILD>           m_children;
+     int                                 m_childCounter;
+     wxString                            m_openingProject; ///< project a helper is starting for
++    WORKSPACE_DOCK*                     m_dock;
+ };
+ 
+ #endif // KICAD_WORKSPACE_PANE_H
+diff --git a/libs/kiplatform/CMakeLists.txt b/libs/kiplatform/CMakeLists.txt
+index 5d8dd529..3f76c7d3 100644
+--- a/libs/kiplatform/CMakeLists.txt
++++ b/libs/kiplatform/CMakeLists.txt
+@@ -5,24 +5,31 @@ if( KICAD_WX_PORT STREQUAL osx )
+     set( PLATFORM_SRCS
+         port/wxosx/ui.mm
+         port/wxosx/webview.mm
++        port/wxosx/window_embed.mm
+         )
+ elseif( KICAD_WX_PORT STREQUAL msw )
+     set( PLATFORM_SRCS
+         port/wxmsw/ui.cpp
+         port/wxmsw/webview.cpp
++        port/wxmsw/window_embed.cpp
+         )
+ elseif( KICAD_WX_PORT STREQUAL gtk )
+     set( PLATFORM_SRCS
+         port/wxgtk/ui.cpp
+         port/wxgtk/webview.cpp
++        port/wxgtk/window_embed.cpp
+         )
+ 
+     find_package(PkgConfig REQUIRED)
+     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+ 
++    # Workspace fork: window_embed.cpp talks to the X server directly
++    find_package( X11 REQUIRED )
++
+     # Detect GTK3 and configure it
+     set( PLATFORM_LIBS
+         ${GTK3_LIBRARIES}
++        ${X11_LIBRARIES}
+         )
+ 
+     include_directories( SYSTEM ${GTK3_INCLUDE_DIRS} )
+diff --git a/libs/kiplatform/include/kiplatform/window_embed.h b/libs/kiplatform/include/kiplatform/window_embed.h
+new file mode 100644
+index 00000000..9e646c14
+--- /dev/null
++++ b/libs/kiplatform/include/kiplatform/window_embed.h
+@@ -0,0 +1,70 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork: control of native top level windows that may belong to another process.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef KIPLATFORM_WINDOW_EMBED_H_
++#define KIPLATFORM_WINDOW_EMBED_H_
++
++#include <wx/gdicmn.h>
++
++class wxWindow;
++
++namespace KIPLATFORM
++{
++/**
++ * Functions to dock editor frames into the document area of the project manager.
++ *
++ * The docked frames stay real top level windows (so their menu bars, keyboard focus, modal
++ * dialogs and OpenGL canvases keep working); they are merely stripped of their decorations,
++ * owned by the manager window and moved exactly over a placeholder inside it.  All functions
++ * take a native window handle (HWND on Windows, X11 window id on Linux) and therefore work
++ * for frames of this process and for frames of the workspace helper processes alike.
++ *
++ * Every function is a harmless no-op for a handle whose window no longer exists.
++ */
++namespace WINDOW_EMBED
++{
++    typedef unsigned long long HANDLE_T;
++
++    /// Docking needs Windows or an X11 display (also XWayland); not available on Wayland/macOS.
++    bool IsSupported();
++
++    /// Native handle of the top level window \a aWindow lives in, 0 if not (yet) realized.
++    HANDLE_T GetHandle( wxWindow* aWindow );
++
++    /// Does the window still exist?
++    bool IsAlive( HANDLE_T aWindow );
++
++    /// Remove title bar and borders, hide from the task bar and keep above \a aOwner.
++    void Attach( HANDLE_T aWindow, wxWindow* aOwner );
++
++    /// Undo Attach(): the window becomes an ordinary free floating window again.
++    void Detach( HANDLE_T aWindow );
++
++    /// Move/resize to \a aScreenRect (wx screen coordinates of \a aOwner's display).
++    void SetGeometry( HANDLE_T aWindow, wxWindow* aOwner, const wxRect& aScreenRect );
++
++    /// Show without taking the focus, or hide.
++    void Show( HANDLE_T aWindow, bool aShow );
++
++    /// Bring to front and give it the keyboard focus (restores a minimized window).
++    void Activate( HANDLE_T aWindow, wxWindow* aOwner );
++}
++}
++
++#endif // KIPLATFORM_WINDOW_EMBED_H_
+diff --git a/libs/kiplatform/port/wxgtk/window_embed.cpp b/libs/kiplatform/port/wxgtk/window_embed.cpp
+new file mode 100644
+index 00000000..9f2c9bb6
+--- /dev/null
++++ b/libs/kiplatform/port/wxgtk/window_embed.cpp
+@@ -0,0 +1,371 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork: control of native top level windows (GTK / X11 implementation).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <kiplatform/window_embed.h>
++
++#include <wx/window.h>
++#include <wx/toplevel.h>
++
++#include <algorithm>
++#include <cstring>
++
++#include <gtk/gtk.h>
++#include <gdk/gdk.h>
++
++#ifdef GDK_WINDOWING_X11
++#include <gdk/gdkx.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++#include <X11/Xatom.h>
++#endif
++
++// The windows handled here may belong to another process and can vanish at any moment.  X
++// answers a request on a vanished window with a BadWindow error, which GDK's default handler
++// turns into a program abort - hence every block of requests sits inside an error trap.
++
++#ifdef GDK_WINDOWING_X11
++
++namespace
++{
++GdkDisplay* x11Display()
++{
++    GdkDisplay* display = gdk_display_get_default();
++
++    return ( display && GDK_IS_X11_DISPLAY( display ) ) ? display : nullptr;
++}
++
++
++/// RAII error trap, also flushes the requests issued inside it.
++class X_TRAP
++{
++public:
++    X_TRAP( GdkDisplay* aDisplay ) : m_display( aDisplay )
++    {
++        gdk_x11_display_error_trap_push( m_display );
++    }
++
++    ~X_TRAP()
++    {
++        XSync( gdk_x11_display_get_xdisplay( m_display ), False );
++        gdk_x11_display_error_trap_pop_ignored( m_display );
++    }
++
++private:
++    GdkDisplay* m_display;
++};
++
++
++Atom atom( Display* aDpy, const char* aName )
++{
++    return XInternAtom( aDpy, aName, False );
++}
++
++
++GdkWindow* topLevelGdkWindow( wxWindow* aWindow )
++{
++    if( !aWindow )
++        return nullptr;
++
++    wxWindow* top = wxGetTopLevelParent( aWindow );
++
++    if( !top || !top->GetHandle() )
++        return nullptr;
++
++    return gtk_widget_get_window( static_cast<GtkWidget*>( top->GetHandle() ) );
++}
++
++
++/// Device pixels per logical (wx) pixel on the owner's monitor.
++int scaleOf( wxWindow* aOwner )
++{
++    GdkWindow* gdkWindow = topLevelGdkWindow( aOwner );
++
++    return gdkWindow ? gdk_window_get_scale_factor( gdkWindow ) : 1;
++}
++
++
++/// Send an EWMH request to the window manager.
++void sendToRoot( Display* aDpy, Window aWindow, const char* aMessage, long a0, long a1, long a2, long a3 )
++{
++    XEvent ev;
++    memset( &ev, 0, sizeof( ev ) );
++
++    ev.xclient.type = ClientMessage;
++    ev.xclient.window = aWindow;
++    ev.xclient.message_type = atom( aDpy, aMessage );
++    ev.xclient.format = 32;
++    ev.xclient.data.l[0] = a0;
++    ev.xclient.data.l[1] = a1;
++    ev.xclient.data.l[2] = a2;
++    ev.xclient.data.l[3] = a3;
++    ev.xclient.data.l[4] = 0;
++
++    XSendEvent( aDpy, DefaultRootWindow( aDpy ), False, SubstructureRedirectMask | SubstructureNotifyMask,
++                &ev );
++}
++
++
++/// Motif hints are the portable way to ask a window manager for an undecorated window.
++void setDecorated( Display* aDpy, Window aWindow, bool aDecorated )
++{
++    Atom hintsAtom = atom( aDpy, "_MOTIF_WM_HINTS" );
++
++    if( aDecorated )
++    {
++        XDeleteProperty( aDpy, aWindow, hintsAtom );
++        return;
++    }
++
++    // flags, functions, decorations, input_mode, status
++    unsigned long hints[5] = { 2 /* MWM_HINTS_DECORATIONS */, 0, 0 /* no decorations */, 0, 0 };
++
++    XChangeProperty( aDpy, aWindow, hintsAtom, hintsAtom, 32, PropModeReplace,
++                     reinterpret_cast<unsigned char*>( hints ), 5 );
++}
++
++
++/// The window manager drops _NET_WM_STATE of a withdrawn window; set it again before mapping.
++void setSkipTaskbarProperty( Display* aDpy, Window aWindow )
++{
++    Atom states[2] = { atom( aDpy, "_NET_WM_STATE_SKIP_TASKBAR" ), atom( aDpy, "_NET_WM_STATE_SKIP_PAGER" ) };
++
++    XChangeProperty( aDpy, aWindow, atom( aDpy, "_NET_WM_STATE" ), XA_ATOM, 32, PropModeReplace,
++                     reinterpret_cast<unsigned char*>( states ), 2 );
++}
++
++
++bool isViewable( Display* aDpy, Window aWindow )
++{
++    XWindowAttributes attrs;
++
++    return XGetWindowAttributes( aDpy, aWindow, &attrs ) && attrs.map_state != IsUnmapped;
++}
++} // namespace
++
++#endif // GDK_WINDOWING_X11
++
++
++namespace KIPLATFORM
++{
++namespace WINDOW_EMBED
++{
++
++bool IsSupported()
++{
++#ifdef GDK_WINDOWING_X11
++    return x11Display() != nullptr;
++#else
++    return false;
++#endif
++}
++
++
++HANDLE_T GetHandle( wxWindow* aWindow )
++{
++#ifdef GDK_WINDOWING_X11
++    if( !x11Display() )
++        return 0;
++
++    GdkWindow* gdkWindow = topLevelGdkWindow( aWindow );
++
++    if( !gdkWindow || !GDK_IS_X11_WINDOW( gdkWindow ) )
++        return 0;
++
++    return static_cast<HANDLE_T>( gdk_x11_window_get_xid( gdkWindow ) );
++#else
++    return 0;
++#endif
++}
++
++
++bool IsAlive( HANDLE_T aWindow )
++{
++#ifdef GDK_WINDOWING_X11
++    GdkDisplay* display = x11Display();
++
++    if( !display || !aWindow )
++        return false;
++
++    Display*          dpy = gdk_x11_display_get_xdisplay( display );
++    XWindowAttributes attrs;
++
++    gdk_x11_display_error_trap_push( display );
++    Status ok = XGetWindowAttributes( dpy, static_cast<Window>( aWindow ), &attrs );
++
++    return gdk_x11_display_error_trap_pop( display ) == 0 && ok != 0;
++#else
++    return false;
++#endif
++}
++
++
++void Attach( HANDLE_T aWindow, wxWindow* aOwner )
++{
++#ifdef GDK_WINDOWING_X11
++    GdkDisplay* display = x11Display();
++    HANDLE_T    owner = GetHandle( aOwner );
++
++    if( !display || !aWindow || !owner || aWindow == owner )
++        return;
++
++    Display* dpy = gdk_x11_display_get_xdisplay( display );
++    Window   win = static_cast<Window>( aWindow );
++    X_TRAP   trap( display );
++
++    // A maximized or full screen window cannot be placed freely
++    sendToRoot( dpy, win, "_NET_WM_STATE", 0 /* remove */, atom( dpy, "_NET_WM_STATE_MAXIMIZED_VERT" ),
++                atom( dpy, "_NET_WM_STATE_MAXIMIZED_HORZ" ), 2 );
++    sendToRoot( dpy, win, "_NET_WM_STATE", 0 /* remove */, atom( dpy, "_NET_WM_STATE_FULLSCREEN" ), 0, 2 );
++
++    setDecorated( dpy, win, false );
++
++    // A transient window is kept above its parent by the window manager and is iconified
++    // together with it.
++    XSetTransientForHint( dpy, win, static_cast<Window>( owner ) );
++
++    sendToRoot( dpy, win, "_NET_WM_STATE", 1 /* add */, atom( dpy, "_NET_WM_STATE_SKIP_TASKBAR" ),
++                atom( dpy, "_NET_WM_STATE_SKIP_PAGER" ), 2 );
++#endif
++}
++
++
++void Detach( HANDLE_T aWindow )
++{
++#ifdef GDK_WINDOWING_X11
++    GdkDisplay* display = x11Display();
++
++    if( !display || !aWindow )
++        return;
++
++    Display* dpy = gdk_x11_display_get_xdisplay( display );
++    Window   win = static_cast<Window>( aWindow );
++    X_TRAP   trap( display );
++
++    bool viewable = isViewable( dpy, win );
++
++    // Window managers evaluate these hints when a window gets mapped; withdraw and map again
++    // so that the change takes effect everywhere.
++    if( viewable )
++        XWithdrawWindow( dpy, win, DefaultScreen( dpy ) );
++
++    setDecorated( dpy, win, true );
++    XDeleteProperty( dpy, win, XA_WM_TRANSIENT_FOR );
++    XDeleteProperty( dpy, win, atom( dpy, "_NET_WM_STATE" ) );
++
++    XSync( dpy, False );
++    XMapWindow( dpy, win );
++#endif
++}
++
++
++void SetGeometry( HANDLE_T aWindow, wxWindow* aOwner, const wxRect& aScreenRect )
++{
++#ifdef GDK_WINDOWING_X11
++    GdkDisplay* display = x11Display();
++
++    if( !display || !aWindow || aScreenRect.width < 1 || aScreenRect.height < 1 )
++        return;
++
++    Display* dpy = gdk_x11_display_get_xdisplay( display );
++    Window   win = static_cast<Window>( aWindow );
++    int      scale = scaleOf( aOwner );
++    int      width = aScreenRect.width * scale;
++    int      height = aScreenRect.height * scale;
++    X_TRAP   trap( display );
++
++    // The frame announces a minimum size to the window manager, which would then refuse to
++    // make it as small as a narrow half of a split view.  Lower that minimum where needed.
++    XSizeHints hints;
++    long       supplied = 0;
++
++    if( XGetWMNormalHints( dpy, win, &hints, &supplied ) && ( hints.flags & PMinSize )
++        && ( hints.min_width > width || hints.min_height > height ) )
++    {
++        hints.min_width = std::min( hints.min_width, width );
++        hints.min_height = std::min( hints.min_height, height );
++        XSetWMNormalHints( dpy, win, &hints );
++    }
++
++    XMoveResizeWindow( dpy, win, aScreenRect.x * scale, aScreenRect.y * scale,
++                       static_cast<unsigned>( width ), static_cast<unsigned>( height ) );
++#endif
++}
++
++
++void Show( HANDLE_T aWindow, bool aShow )
++{
++#ifdef GDK_WINDOWING_X11
++    GdkDisplay* display = x11Display();
++
++    if( !display || !aWindow )
++        return;
++
++    Display* dpy = gdk_x11_display_get_xdisplay( display );
++    Window   win = static_cast<Window>( aWindow );
++    X_TRAP   trap( display );
++
++    bool viewable = isViewable( dpy, win );
++
++    if( aShow && !viewable )
++    {
++        setSkipTaskbarProperty( dpy, win );
++        XMapWindow( dpy, win );
++    }
++    else if( !aShow && viewable )
++    {
++        XWithdrawWindow( dpy, win, DefaultScreen( dpy ) );
++    }
++#endif
++}
++
++
++void Activate( HANDLE_T aWindow, wxWindow* aOwner )
++{
++#ifdef GDK_WINDOWING_X11
++    GdkDisplay* display = x11Display();
++
++    if( !display || !aWindow )
++        return;
++
++    Display* dpy = gdk_x11_display_get_xdisplay( display );
++    Window   win = static_cast<Window>( aWindow );
++
++    // A current time stamp proves to the window manager that the request stems from a user
++    // action; without it focus stealing prevention would only flash the task bar entry.
++    guint32    timestamp = gtk_get_current_event_time();
++    GdkWindow* ownerWindow = topLevelGdkWindow( aOwner );
++
++    if( timestamp == GDK_CURRENT_TIME && ownerWindow && GDK_IS_X11_WINDOW( ownerWindow ) )
++        timestamp = gdk_x11_get_server_time( ownerWindow );
++
++    X_TRAP trap( display );
++
++    if( !isViewable( dpy, win ) )
++    {
++        setSkipTaskbarProperty( dpy, win );
++        XMapWindow( dpy, win );
++    }
++
++    // source indication 2 = "pager": honoured by window managers regardless of who has focus
++    sendToRoot( dpy, win, "_NET_ACTIVE_WINDOW", 2, static_cast<long>( timestamp ), 0, 0 );
++#endif
++}
++
++}
++}
+diff --git a/libs/kiplatform/port/wxmsw/window_embed.cpp b/libs/kiplatform/port/wxmsw/window_embed.cpp
+new file mode 100644
+index 00000000..3e6222aa
+--- /dev/null
++++ b/libs/kiplatform/port/wxmsw/window_embed.cpp
+@@ -0,0 +1,187 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork: control of native top level windows (Windows implementation).
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <kiplatform/window_embed.h>
++
++#include <wx/window.h>
++#include <wx/toplevel.h>
++
++#include <windows.h>
++
++namespace
++{
++/// Window property holding the style bits the window had before it was docked.
++const wchar_t* const PROP_STYLE = L"KiCadWorkspaceStyle";
++
++/// Style bits that make up title bar and resizable border.
++const LONG_PTR DECORATION = WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
++
++HWND toHwnd( KIPLATFORM::WINDOW_EMBED::HANDLE_T aWindow )
++{
++    return reinterpret_cast<HWND>( static_cast<UINT_PTR>( aWindow ) );
++}
++
++HWND ownerHwnd( wxWindow* aOwner )
++{
++    if( !aOwner )
++        return nullptr;
++
++    wxWindow* top = wxGetTopLevelParent( aOwner );
++
++    return top ? static_cast<HWND>( top->GetHWND() ) : nullptr;
++}
++} // namespace
++
++
++namespace KIPLATFORM
++{
++namespace WINDOW_EMBED
++{
++
++bool IsSupported()
++{
++    return true;
++}
++
++
++HANDLE_T GetHandle( wxWindow* aWindow )
++{
++    if( !aWindow )
++        return 0;
++
++    wxWindow* top = wxGetTopLevelParent( aWindow );
++
++    if( !top || !top->GetHWND() )
++        return 0;
++
++    return static_cast<HANDLE_T>( reinterpret_cast<UINT_PTR>( top->GetHWND() ) );
++}
++
++
++bool IsAlive( HANDLE_T aWindow )
++{
++    return aWindow != 0 && ::IsWindow( toHwnd( aWindow ) );
++}
++
++
++void Attach( HANDLE_T aWindow, wxWindow* aOwner )
++{
++    HWND hwnd = toHwnd( aWindow );
++    HWND owner = ownerHwnd( aOwner );
++
++    if( !::IsWindow( hwnd ) || !owner || hwnd == owner )
++        return;
++
++    // A maximized or minimized window cannot be placed freely
++    if( ::IsZoomed( hwnd ) || ::IsIconic( hwnd ) )
++        ::ShowWindow( hwnd, SW_RESTORE );
++
++    LONG_PTR style = ::GetWindowLongPtrW( hwnd, GWL_STYLE );
++
++    // Remember the original decoration once (the property survives until Detach)
++    if( !::GetPropW( hwnd, PROP_STYLE ) )
++        ::SetPropW( hwnd, PROP_STYLE, reinterpret_cast<HANDLE>( ( style & DECORATION ) | 1 ) );
++
++    ::SetWindowLongPtrW( hwnd, GWL_STYLE, style & ~DECORATION );
++
++    // An owned window always stays above its owner, has no task bar button and is minimized
++    // and restored together with it.
++    ::SetWindowLongPtrW( hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>( owner ) );
++
++    ::SetWindowPos( hwnd, nullptr, 0, 0, 0, 0,
++                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE );
++}
++
++
++void Detach( HANDLE_T aWindow )
++{
++    HWND hwnd = toHwnd( aWindow );
++
++    if( !::IsWindow( hwnd ) )
++        return;
++
++    LONG_PTR saved = reinterpret_cast<LONG_PTR>( ::GetPropW( hwnd, PROP_STYLE ) );
++
++    if( !saved )
++        return;     // was never docked
++
++    ::RemovePropW( hwnd, PROP_STYLE );
++
++    LONG_PTR style = ::GetWindowLongPtrW( hwnd, GWL_STYLE );
++    ::SetWindowLongPtrW( hwnd, GWL_STYLE, ( style & ~DECORATION ) | ( saved & DECORATION ) );
++    ::SetWindowLongPtrW( hwnd, GWLP_HWNDPARENT, 0 );
++
++    ::SetWindowPos( hwnd, nullptr, 0, 0, 0, 0,
++                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE );
++
++    // Make sure a window that was hidden as an inactive tab does not stay invisible
++    ::ShowWindowAsync( hwnd, SW_SHOWNA );
++}
++
++
++void SetGeometry( HANDLE_T aWindow, wxWindow* aOwner, const wxRect& aScreenRect )
++{
++    HWND hwnd = toHwnd( aWindow );
++
++    if( !::IsWindow( hwnd ) )
++        return;
++
++    // SWP_ASYNCWINDOWPOS: never block on a busy helper process
++    ::SetWindowPos( hwnd, nullptr, aScreenRect.x, aScreenRect.y, aScreenRect.width, aScreenRect.height,
++                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
++}
++
++
++void Show( HANDLE_T aWindow, bool aShow )
++{
++    HWND hwnd = toHwnd( aWindow );
++
++    if( !::IsWindow( hwnd ) )
++        return;
++
++    ::ShowWindowAsync( hwnd, aShow ? SW_SHOWNA : SW_HIDE );
++}
++
++
++void Activate( HANDLE_T aWindow, wxWindow* aOwner )
++{
++    HWND hwnd = toHwnd( aWindow );
++
++    if( !::IsWindow( hwnd ) )
++        return;
++
++    if( ::IsIconic( hwnd ) )
++        ::ShowWindowAsync( hwnd, SW_RESTORE );
++    else if( !::IsWindowVisible( hwnd ) )
++        ::ShowWindowAsync( hwnd, SW_SHOW );
++
++    // The manager is the foreground process at this moment (the user just clicked in it),
++    // which is what entitles it to hand the foreground to a window of another process.
++    DWORD pid = 0;
++    ::GetWindowThreadProcessId( hwnd, &pid );
++
++    if( pid && pid != ::GetCurrentProcessId() )
++        ::AllowSetForegroundWindow( pid );
++
++    ::BringWindowToTop( hwnd );
++    ::SetForegroundWindow( hwnd );
++}
++
++}
++}
+diff --git a/libs/kiplatform/port/wxosx/window_embed.mm b/libs/kiplatform/port/wxosx/window_embed.mm
+new file mode 100644
+index 00000000..197150b3
+--- /dev/null
++++ b/libs/kiplatform/port/wxosx/window_embed.mm
+@@ -0,0 +1,27 @@
++/*
++ * This program source code file is part of KiCad, a free EDA CAD application.
++ *
++ * Workspace fork: docking of editor frames is not implemented on macOS.
++ *
++ * This program is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or (at your
++ * option) any later version.
++ */
++
++#include <kiplatform/window_embed.h>
++
++namespace KIPLATFORM
++{
++namespace WINDOW_EMBED
++{
++bool     IsSupported() { return false; }
++HANDLE_T GetHandle( wxWindow* ) { return 0; }
++bool     IsAlive( HANDLE_T ) { return false; }
++void     Attach( HANDLE_T, wxWindow* ) {}
++void     Detach( HANDLE_T ) {}
++void     SetGeometry( HANDLE_T, wxWindow*, const wxRect& ) {}
++void     Show( HANDLE_T, bool ) {}
++void     Activate( HANDLE_T, wxWindow* ) {}
++}
++}
+diff --git a/translation/pofiles/de.po b/translation/pofiles/de.po
+index 61c67575..12ab8b2a 100644
+--- a/translation/pofiles/de.po
++++ b/translation/pofiles/de.po
+@@ -62265,6 +62265,42 @@ msgstr "Workspace-Bereich ein-/ausblenden"
+ msgid "Show or hide the workspace pane"
+ msgstr "Den Workspace-Bereich ein- oder ausblenden"
+ 
++#: workspace fork
++msgid "Show Editors as Tabs"
++msgstr "Editoren als Tabs anzeigen"
++
++#: workspace fork
++msgid "Dock the editor windows of all workspace projects as tabs into this window"
++msgstr "Die Editorfenster aller Workspace-Projekte als Tabs in dieses Fenster einbinden"
++
++#: workspace fork
++msgid "Showing editors as tabs is not available on this display server (it needs Windows or X11)."
++msgstr "Die Anzeige der Editoren als Tabs ist auf diesem Anzeigesystem nicht verfügbar (benötigt Windows oder X11)."
++
++#: workspace fork
++msgid "Editor"
++msgstr "Editor"
++
++#: workspace fork
++msgid "Show Beside (Split Right)"
++msgstr "Daneben anzeigen (rechts teilen)"
++
++#: workspace fork
++msgid "Show Below (Split Down)"
++msgstr "Darunter anzeigen (unten teilen)"
++
++#: workspace fork
++msgid "Remove Split"
++msgstr "Teilung aufheben"
++
++#: workspace fork
++msgid "Undock as Separate Window"
++msgstr "Als eigenes Fenster lösen"
++
++#: workspace fork
++msgid "Close Editor"
++msgstr "Editor schließen"
++
+ #~ msgid "Symbol '%s.asy' not found"
+ #~ msgstr "Symbol \"%s.asy\" nicht gefunden"
+ 
+-- 
+2.43.0
+
+
+From 8cfe54f913c5a3f94a3174c8f91319c5bdd92abc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 08:17:23 +0100
+Subject: [PATCH 7/7] Workspace fork: details line instead of tree tool tips,
+ open on button release
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoFaQx6u1pkd95cXk8bWQX
+---
+ kicad/workspace_pane.cpp | 161 +++++++++++++++++++++++++++++----------
+ kicad/workspace_pane.h   |   7 +-
+ 2 files changed, 126 insertions(+), 42 deletions(-)
+
+diff --git a/kicad/workspace_pane.cpp b/kicad/workspace_pane.cpp
+index 473b4a3c..669f6f5e 100644
+--- a/kicad/workspace_pane.cpp
++++ b/kicad/workspace_pane.cpp
+@@ -47,6 +47,7 @@
+ #include <project.h>
+ #include <tool/tool_manager.h>
+ #include <wildcards_and_files_ext.h>
++#include <widgets/ui_common.h>
+ 
+ #include <frame_type.h>
+ 
+@@ -122,12 +123,14 @@ WORKSPACE_PANE::WORKSPACE_PANE( KICAD_MANAGER_FRAME* aParent ) :
+         m_title( nullptr ),
+         m_tree( nullptr ),
+         m_activity( nullptr ),
++        m_details( nullptr ),
+         m_timer( this ),
+         m_scanRequested( true ),
+         m_firstScanDone( false ),
+         m_ticksSinceScan( 0 ),
+         m_childCounter( 0 ),
+-        m_dock( nullptr )
++        m_dock( nullptr ),
++        m_deferredWhat( OPEN_WHAT::SCHEMATIC )
+ {
+     buildUi();
+     loadInitialWorkspace();
+@@ -220,18 +223,56 @@ void WORKSPACE_PANE::buildUi()
+     images.push_back( KiBitmapBundleDef( BITMAPS::unknown, 22 ) );          // WS_ICON_MISSING
+     m_tree->SetImages( images );
+ 
+-    m_activity = new wxListBox( splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, nullptr,
++    // Below the tree: details of the selected entry, then the activity list.
++    //
++    // The details used to be a tool tip of the tree item.  A tool tip pops up right below the
++    // mouse pointer, i.e. on top of the next row, and swallowed the first click of a double
++    // click on that row - "double click does not always open the file".
++    wxPanel*    bottom = new wxPanel( splitter, wxID_ANY );
++    wxBoxSizer* bottomSizer = new wxBoxSizer( wxVERTICAL );
++
++    m_details = new wxStaticText( bottom, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
++                                  wxST_NO_AUTORESIZE | wxST_ELLIPSIZE_END );
++    m_details->SetFont( KIUI::GetInfoFont( this ) );
++    m_details->SetMinSize( wxSize( -1, m_details->GetCharHeight() * 2 + FromDIP( 4 ) ) );
++    bottomSizer->Add( m_details, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 3 );
++
++    m_activity = new wxListBox( bottom, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0, nullptr,
+                                 wxLB_SINGLE | wxLB_HSCROLL | wxBORDER_NONE );
+     m_activity->SetToolTip( _( "Activity of other users in the workspace projects" ) );
++    bottomSizer->Add( m_activity, 1, wxEXPAND | wxTOP, 2 );
+ 
+-    splitter->SplitHorizontally( m_tree, m_activity, -FromDIP( 80 ) );
++    bottom->SetSizer( bottomSizer );
++
++    splitter->SplitHorizontally( m_tree, bottom, -FromDIP( 110 ) );
+     mainSizer->Add( splitter, 1, wxEXPAND );
+ 
+     SetSizer( mainSizer );
+ 
+     m_tree->Bind( wxEVT_TREE_ITEM_ACTIVATED, &WORKSPACE_PANE::onItemActivated, this );
++
++    // Carry out a double click once its second click is complete (see onItemActivated)
++    m_tree->Bind( wxEVT_LEFT_UP,
++                  [this]( wxMouseEvent& aEvent )
++                  {
++                      aEvent.Skip();
++
++                      if( !m_deferredProFile.IsEmpty() )
++                      {
++                          CallAfter(
++                                  [this]()
++                                  {
++                                      runDeferredOpen();
++                                  } );
++                      }
++                  } );
+     m_tree->Bind( wxEVT_TREE_ITEM_MENU, &WORKSPACE_PANE::onItemMenu, this );
+-    m_tree->Bind( wxEVT_TREE_ITEM_GETTOOLTIP, &WORKSPACE_PANE::onItemTooltip, this );
++    m_tree->Bind( wxEVT_TREE_SEL_CHANGED,
++                  [this]( wxTreeEvent& aEvent )
++                  {
++                      aEvent.Skip();
++                      updateDetails();
++                  } );
+ 
+     m_tree->Bind( wxEVT_TREE_ITEM_COLLAPSED,
+                   [this]( wxTreeEvent& aEvent )
+@@ -495,6 +536,10 @@ const WS_PROJECT* WORKSPACE_PANE::findProject( const wxString& aProFile ) const
+ 
+ void WORKSPACE_PANE::onTimer( wxTimerEvent& aEvent )
+ {
++    // Safety net should the release of a double click never have reached the tree
++    if( !m_deferredProFile.IsEmpty() && !wxGetMouseState().LeftIsDown() )
++        runDeferredOpen();
++
+     if( m_scan.valid() )
+     {
+         if( m_scan.wait_for( std::chrono::seconds( 0 ) ) != std::future_status::ready )
+@@ -720,33 +765,34 @@ wxColour WORKSPACE_PANE::lockColour( const WS_LOCK_INFO& aLock ) const
+ 
+ wxString WORKSPACE_PANE::lockTooltip( const wxString& aPath, const WS_LOCK_INFO& aLock ) const
+ {
+-    wxString tip = aPath;
++    // Line 1: who and since when; line 2: the file.  Shown below the tree for the selection.
++    wxString line;
+ 
+     if( !aLock.locked )
+-        return tip + wxS( "\n" ) + _( "Not open anywhere." );
+-
+-    wxString since = aLock.since;
+-    since.Replace( wxS( "T" ), wxS( " " ) );
++    {
++        line = _( "Not open anywhere." );
++    }
++    else
++    {
++        wxString since = aLock.since;
++        since.Replace( wxS( "T" ), wxS( " " ) );
+ 
+-    tip << wxS( "\n" ) << _( "User:" ) << wxS( " " ) << ( aLock.user.IsEmpty() ? _( "unknown" ) : aLock.user );
+-    tip << wxS( "\n" ) << _( "Computer:" ) << wxS( " " ) << ( aLock.host.IsEmpty() ? _( "unknown" ) : aLock.host );
++        line = aLock.Owner().IsEmpty() ? _( "Unknown user" ) : aLock.Owner();
+ 
+-    if( !since.IsEmpty() )
+-        tip << wxS( "\n" ) << _( "Since:" ) << wxS( " " ) << since;
++        if( !since.IsEmpty() )
++            line << wxS( "  \u00B7  " ) << _( "Since:" ) << wxS( " " ) << since;
+ 
+-    if( !aLock.app.IsEmpty() )
+-        tip << wxS( "\n" ) << _( "Application:" ) << wxS( " " ) << aLock.app;
++        if( !aLock.app.IsEmpty() )
++            line << wxS( "  \u00B7  " ) << aLock.app;
+ 
+-    if( aLock.pid > 0 )
+-        tip << wxS( "\n" ) << wxS( "PID: " ) << aLock.pid;
++        if( aLock.pid > 0 )
++            line << wxS( " (PID " ) << aLock.pid << wxS( ")" );
+ 
+-    if( aLock.stale )
+-    {
+-        tip << wxS( "\n" ) << _( "The process that created this lock no longer exists. The lock is "
+-                                 "removed automatically when the file is opened." );
++        if( aLock.stale )
++            line << wxS( "  \u00B7  " ) << _( "stale lock (crashed session)" );
+     }
+ 
+-    return tip;
++    return line + wxS( "\n" ) + aPath;
+ }
+ 
+ 
+@@ -883,34 +929,46 @@ void WORKSPACE_PANE::updateLabels()
+             m_tree->SetItemTextColour( fileIt->second, lockColour( file.lock ) );
+         }
+     }
++
++    updateDetails();
+ }
+ 
+ 
+-void WORKSPACE_PANE::onItemTooltip( wxTreeEvent& aEvent )
++void WORKSPACE_PANE::updateDetails()
+ {
+-    WS_ITEM_DATA* data = dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( aEvent.GetItem() ) );
++    wxString text;
+ 
+-    if( !data )
+-        return;
++    wxTreeItemId  sel = m_tree->GetSelection();
++    WS_ITEM_DATA* data = sel.IsOk() ? dynamic_cast<WS_ITEM_DATA*>( m_tree->GetItemData( sel ) ) : nullptr;
+ 
+-    const WS_PROJECT* prj = findProject( data->m_proFile );
+-
+-    if( !prj )
+-        return;
+-
+-    if( data->IsProject() )
++    if( data )
+     {
+-        aEvent.SetToolTip( lockTooltip( prj->proFile, prj->lock ) );
+-        return;
++        if( const WS_PROJECT* prj = findProject( data->m_proFile ) )
++        {
++            if( data->IsProject() )
++            {
++                text = lockTooltip( prj->proFile, prj->lock );
++            }
++            else
++            {
++                for( const WS_FILE& file : prj->files )
++                {
++                    if( file.path == data->m_file )
++                    {
++                        text = lockTooltip( file.path, file.lock );
++                        break;
++                    }
++                }
++            }
++        }
+     }
+ 
+-    for( const WS_FILE& file : prj->files )
++    if( m_details->GetLabel() != text )
+     {
+-        if( file.path == data->m_file )
+-        {
+-            aEvent.SetToolTip( lockTooltip( file.path, file.lock ) );
+-            return;
+-        }
++        // First line: who has it open; the full text (with path) is the tool tip of the label,
++        // which sits well away from the tree rows.
++        m_details->SetLabel( text );
++        m_details->SetToolTip( text );
+     }
+ }
+ 
+@@ -930,7 +988,28 @@ void WORKSPACE_PANE::onItemActivated( wxTreeEvent& aEvent )
+ 
+     bool isSch = wxFileName( data->m_file ).GetExt().Lower() == FILEEXT::KiCadSchematicFileExtension;
+ 
+-    openInProject( data->m_proFile, isSch ? OPEN_WHAT::SCHEMATIC : OPEN_WHAT::PCB );
++    m_deferredProFile = data->m_proFile;
++    m_deferredWhat = isSch ? OPEN_WHAT::SCHEMATIC : OPEN_WHAT::PCB;
++
++    // A double click activates the item while the mouse button is still held down.  Opening
++    // (or bringing to the front) another window at that moment takes the focus away in the
++    // middle of the click and the toolkit then loses a click of the next double click.  So
++    // wait for the button to be released; activation by keyboard is carried out at once.
++    if( !wxGetMouseState().LeftIsDown() )
++        runDeferredOpen();
++}
++
++
++void WORKSPACE_PANE::runDeferredOpen()
++{
++    if( m_deferredProFile.IsEmpty() )
++        return;
++
++    wxString  proFile = m_deferredProFile;
++    OPEN_WHAT what = m_deferredWhat;
++
++    m_deferredProFile.clear();
++    openInProject( proFile, what );
+ }
+ 
+ 
+diff --git a/kicad/workspace_pane.h b/kicad/workspace_pane.h
+index 3228c15f..0579cef1 100644
+--- a/kicad/workspace_pane.h
++++ b/kicad/workspace_pane.h
+@@ -128,8 +128,9 @@ private:
+     void removeProject( const wxString& aProFile );
+ 
+     void onItemActivated( wxTreeEvent& aEvent );
++    void runDeferredOpen();
+     void onItemMenu( wxTreeEvent& aEvent );
+-    void onItemTooltip( wxTreeEvent& aEvent );
++    void updateDetails();
+ 
+     const WS_PROJECT* findProject( const wxString& aProFile ) const;
+ 
+@@ -140,6 +141,7 @@ private:
+     wxStaticText*        m_title;
+     wxTreeCtrl*          m_tree;
+     wxListBox*           m_activity;
++    wxStaticText*        m_details;     ///< who has the selected entry open
+     wxTimer              m_timer;
+ 
+     std::vector<WS_PROJECT>             m_snapshot;
+@@ -158,6 +160,9 @@ private:
+     int                                 m_childCounter;
+     wxString                            m_openingProject; ///< project a helper is starting for
+     WORKSPACE_DOCK*                     m_dock;
++
++    wxString                            m_deferredProFile;  ///< double click waiting for the
++    OPEN_WHAT                           m_deferredWhat;     ///< mouse button to be released
+ };
+ 
+ #endif // KICAD_WORKSPACE_PANE_H
 -- 
 2.43.0
 

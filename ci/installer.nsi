@@ -18,7 +18,7 @@ SetCompressorDictSize 64
   !define OUTFILE "kicad-riegl-ws-setup.exe"
 !endif
 !ifndef PKGVERSION
-  !define PKGVERSION "10.0.8-rieglws1"
+  !define PKGVERSION "10.0.8-rieglws2"
 !endif
 
 !define APPNAME    "KiCad Workspace (RIEGL-Fork)"
