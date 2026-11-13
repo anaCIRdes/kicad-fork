@@ -4,14 +4,16 @@ Dieses Repository baut den **KiCad Workspace-Fork (RIEGL)** auf den Servern von 
 
 | Ablauf (Workflow) | Ergebnis | Dauer |
 |---|---|---|
-| **Windows-Installer** | `kicad-riegl-ws-10.0.8-rieglws2-x86_64.exe` (Windows 10/11, 64 Bit) | mehrere Stunden; am längsten, wenn der Zwischenspeicher leer ist |
-| **Linux-Paket** | `kicad-riegl-ws_10.0.8+rieglws2_amd64.deb` (Ubuntu 24.04 / Linux Mint 22) | geschätzt 1–2 Stunden |
+| **Windows-Installer** | `kicad-riegl-ws-10.0.8-rieglws3-x86_64.exe` (Windows 10/11, 64 Bit) | mehrere Stunden; am längsten, wenn der Zwischenspeicher leer ist |
+| **Linux-Paket** | `kicad-riegl-ws_10.0.8+rieglws3_amd64.deb` (Ubuntu 24.04 / Linux Mint 22) | geschätzt 1–2 Stunden |
 
 Gebaut wird jeweils das offizielle KiCad 10.0.8 plus der Patch in `patch/`.
 
-> Der Windows-Ablauf ist mit Version rieglws1 erfolgreich gelaufen. Der Linux-Ablauf ist neu
-> und **noch nie auf GitHub gelaufen**; seine Schritte entsprechen dem Build, mit dem das
-> mitgelieferte .deb entstanden ist.
+> Der Windows-Ablauf ist mit Version rieglws1 erfolgreich gelaufen. Ob er mit rieglws2 und dem
+> Linux-Ablauf gelaufen ist, weiß ich nicht. Der neue Code von rieglws3 (xSignals) ist
+> **nur unter Linux gebaut und getestet**; mit dem Microsoft-Compiler ist er noch nie übersetzt
+> worden. Schlägt der Windows-Lauf im Schritt „KiCad kompilieren“ fehl, bitte den Namen der
+> Datei und die Fehlermeldung schicken (Abschnitt E).
 
 ## Inhalt
 
@@ -26,12 +28,15 @@ Gebaut wird jeweils das offizielle KiCad 10.0.8 plus der Patch in `patch/`.
 | `workflow-dateien/*.yml` | Vorlagen der beiden Workflow-Dateien zum Einfügen (siehe unten) |
 | `.github/workflows/*.yml` | Die aktiven Workflow-Dateien (nur im Repository auf GitHub) |
 
+Für Version rieglws3 sind **keine Workflow-Dateien zu ändern**. Hochzuladen sind wie immer
+`ci`, `patch` und `README.md` (Abschnitt A).
+
 ## A – Neue Version hochladen (Normalfall)
 
 1. Im Browser `https://github.com/anaCIRdes/kicad-fork` öffnen.
 2. **Add file → Upload files**.
 3. Aus dem Ordner `KiCAD-Fork\github` die Ordner **`ci`** und **`patch`** sowie **`README.md`** in das Browserfenster ziehen. Vorhandene Dateien werden dabei ersetzt.
-4. Unten bei *Commit changes* einen kurzen Text eintragen (z. B. „Version rieglws2“) und **Commit changes** klicken.
+4. Unten bei *Commit changes* einen kurzen Text eintragen (z. B. „Version rieglws3“) und **Commit changes** klicken.
 5. Beide Abläufe starten von selbst. Kontrolle unter **Actions**.
 
 Die Workflow-Dateien müssen dabei nicht angefasst werden, solange sich an ihnen nichts ändert. Ob sich eine geändert hat, steht jeweils in der Readme der Lieferung.
@@ -82,7 +87,7 @@ Den Lauf öffnen → den Job mit rotem Kreuz anklicken → der fehlgeschlagene S
 
 **Linux-Paket**
 
-- `sudo apt install ./kicad-riegl-ws_10.0.8+rieglws2_amd64.deb`, installiert nach `/opt/kicad-riegl-ws`, Start mit `kicad-riegl-ws`.
+- `sudo apt install ./kicad-riegl-ws_10.0.8+rieglws3_amd64.deb`, installiert nach `/opt/kicad-riegl-ws`, Start mit `kicad-riegl-ws`.
 - Nur für Ubuntu 24.04 und Linux Mint 22; auf Ubuntu 22.04 fehlen die nötigen Bibliotheksversionen.
 
 ## Lizenz

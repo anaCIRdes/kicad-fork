@@ -21,8 +21,8 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $KicadTag   = '10.0.8'
-$VersionExtra = 'riegl-ws2'
-$PkgVersion = '10.0.8-rieglws2'
+$VersionExtra = 'riegl-ws3'
+$PkgVersion = '10.0.8-rieglws3'
 
 $Repo  = Split-Path -Parent $PSScriptRoot
 $Root  = if ($env:KWS_ROOT) { $env:KWS_ROOT } else { 'C:\k' }

@@ -9,7 +9,7 @@ set -euo pipefail
 
 BUILD="$(realpath "$1")"
 OUT="$(realpath "$2")"
-VERSION="${3:-10.0.8+rieglws2}"
+VERSION="${3:-10.0.8+rieglws3}"
 PREFIX=/opt/kicad-riegl-ws
 PKG=kicad-riegl-ws
 ARCH="$(dpkg --print-architecture)"

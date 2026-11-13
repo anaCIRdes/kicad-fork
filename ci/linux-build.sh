@@ -11,8 +11,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(realpath -m "${1:-$HOME/kicad-fork-build}")"
 TAG=10.0.8
-EXTRA=riegl-ws2
-PKGVERSION="$TAG+rieglws2"
+EXTRA=riegl-ws3
+PKGVERSION="$TAG+rieglws3"
 PREFIX=/opt/kicad-riegl-ws
 PATCH="$REPO/patch/kicad-$TAG-riegl-workspace.patch"
 
