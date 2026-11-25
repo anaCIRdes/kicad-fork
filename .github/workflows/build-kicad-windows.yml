@@ -71,6 +71,8 @@ jobs:
           "Source: $origin ($actual)" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Configure and build KiCad with Visual Studio
+        # KiBuild's System.Drawing helper uses the Windows PowerShell .NET Framework runtime.
+        shell: powershell
         run: |
           $builder = Join-Path $env:RUNNER_TEMP 'kb'
           $driver = Join-Path $builder 'build.ps1'
@@ -107,6 +109,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package the lite runtime and verify it
+        shell: powershell
         run: |
           $builder = Join-Path $env:RUNNER_TEMP 'kb'
           $driver = Join-Path $builder 'build.ps1'
@@ -123,7 +126,7 @@ jobs:
           $dist = New-Item -ItemType Directory -Path 'dist' -Force
           $zip = Join-Path $dist.FullName "kicad-xsignal-test-windows-x64-$env:KICAD_SOURCE_SHA.zip"
           Compress-Archive -Path (Join-Path $prefix '*') -DestinationPath $zip
-          'Windows x64 portable lite build. Standard symbol, footprint and 3D libraries are separate.' >> $env:GITHUB_STEP_SUMMARY
+          'Windows x64 portable lite build. Standard symbol, footprint and 3D libraries are separate.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload the test build
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
