@@ -67,6 +67,18 @@ jobs:
           if ($actual -ne $expected -or !(Test-Path -LiteralPath (Join-Path $source 'CMakeLists.txt'))) {
             throw "KiCad source verification failed for $origin."
           }
+          $patch = Join-Path $env:GITHUB_WORKSPACE 'patches/kicad-routing-preview.patch'
+          if (Test-Path -LiteralPath $patch) {
+            git -C $source apply --check $patch
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            git -C $source apply $patch
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "Source patch: patches/kicad-routing-preview.patch" >> $env:GITHUB_STEP_SUMMARY
+          }
+          $header = Join-Path $source 'pcbnew/python/scripting/pcbnew_scripting_helpers.h'
+          if (Select-String -LiteralPath $header -SimpleMatch 'GetRoutingPreview()' -Quiet) {
+            'KICAD_EXPECT_ROUTER_PREVIEW=1' >> $env:GITHUB_ENV
+          }
           "KICAD_SOURCE_SHA=$actual" >> $env:GITHUB_ENV
           "Source: $origin ($actual)" >> $env:GITHUB_STEP_SUMMARY
 
@@ -136,7 +148,7 @@ jobs:
           $env:KICAD_CONFIG_HOME = Join-Path $env:RUNNER_TEMP 'kicad-smoke-config'
           & (Join-Path $bin 'kicad-cli.exe') version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $bin 'python.exe') -c 'import pcbnew, wx; print(pcbnew.Version()); print(wx.version())'
+          & (Join-Path $bin 'python.exe') -c 'import os, pcbnew, wx; print(pcbnew.Version()); print(wx.version()); assert not os.getenv("KICAD_EXPECT_ROUTER_PREVIEW") or callable(getattr(pcbnew, "GetRoutingPreview", None))'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $dist = New-Item -ItemType Directory -Path 'dist' -Force

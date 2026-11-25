@@ -10,6 +10,9 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    env:
+      KICAD_UPSTREAM_TAG: '10.0.8'
+      KICAD_UPSTREAM_COMMIT: e432beac2668303194ba2040274f9e5efe773fc0
     defaults:
       run:
         shell: bash
@@ -21,6 +24,35 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Resolve and verify the KiCad source
+        run: |
+          source_dir="$GITHUB_WORKSPACE"
+          expected="$GITHUB_SHA"
+          origin='selected repository revision'
+          if [[ ! -f "$source_dir/CMakeLists.txt" ]]; then
+            source_dir="$RUNNER_TEMP/kicad-src"
+            git clone --depth 1 --single-branch --branch "$KICAD_UPSTREAM_TAG" \
+              https://github.com/KiCad/kicad-source-mirror.git "$source_dir"
+            expected="$KICAD_UPSTREAM_COMMIT"
+            origin="upstream KiCad $KICAD_UPSTREAM_TAG"
+          fi
+          actual="$(git -C "$source_dir" rev-parse HEAD)"
+          if [[ "$actual" != "$expected" || ! -f "$source_dir/CMakeLists.txt" ]]; then
+            echo "KiCad source verification failed for $origin." >&2
+            exit 1
+          fi
+          patch="$GITHUB_WORKSPACE/patches/kicad-routing-preview.patch"
+          if [[ -f "$patch" ]]; then
+            git -C "$source_dir" apply --check "$patch"
+            git -C "$source_dir" apply "$patch"
+            echo 'Source patch: patches/kicad-routing-preview.patch' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if grep -qF 'GetRoutingPreview()' "$source_dir/pcbnew/python/scripting/pcbnew_scripting_helpers.h"; then
+            echo 'KICAD_EXPECT_ROUTER_PREVIEW=1' >> "$GITHUB_ENV"
+          fi
+          printf 'KICAD_SOURCE_DIR=%s\nKICAD_SOURCE_SHA=%s\n' "$source_dir" "$actual" >> "$GITHUB_ENV"
+          printf 'Source: %s (%s)\n' "$origin" "$actual" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install Ubuntu build dependencies
         run: |
           sudo add-apt-repository --yes --enable-source ppa:kicad/kicad-10.0-releases
@@ -31,7 +63,7 @@ jobs:
 
       - name: Configure and build KiCad
         run: |
-          cmake -S . -B "$RUNNER_TEMP/kicad-build" -G Ninja \
+          cmake -S "$KICAD_SOURCE_DIR" -B "$RUNNER_TEMP/kicad-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/opt/kicad-xsignal-test \
             -DCMAKE_INSTALL_LIBDIR=lib \
@@ -52,13 +84,13 @@ jobs:
           bindings="$(find "$prefix" -type f -name pcbnew.py -print -quit)"
           test -n "$bindings"
           PYTHONPATH="$(dirname "$bindings")" xvfb-run -a /usr/bin/python3 \
-            -c 'import pcbnew, wx; print(pcbnew.Version()); print(wx.version())'
+            -c 'import os, pcbnew, wx; print(pcbnew.Version()); print(wx.version()); assert not os.getenv("KICAD_EXPECT_ROUTER_PREVIEW") or callable(getattr(pcbnew, "GetRoutingPreview", None))'
 
       - name: Package the Linux files
         run: |
           mkdir -p dist
           tar -C "$RUNNER_TEMP/kicad-stage/opt" \
-            -czf "dist/kicad-xsignal-test-ubuntu24.04-x86_64-$GITHUB_SHA.tar.gz" kicad-xsignal-test
+            -czf "dist/kicad-xsignal-test-ubuntu24.04-x86_64-$KICAD_SOURCE_SHA.tar.gz" kicad-xsignal-test
           {
             echo 'Ubuntu 24.04 x86-64. The archive stages an installation under /opt/kicad-xsignal-test.'
             echo 'Runtime dependencies and standard libraries are supplied by the KiCad 10.0 Ubuntu packages.'
