@@ -20,7 +20,9 @@ jobs:
       run:
         shell: pwsh
     env:
-      WIN_BUILDER_COMMIT: ec74a8021d7981bd4dcd032f6693a3ba414f41
+      WIN_BUILDER_COMMIT: ec74a8021d7981bd4dcd032f6693a3a3ba414f41
+      KICAD_UPSTREAM_TAG: '10.0.8'
+      KICAD_UPSTREAM_COMMIT: e432beac2668303194ba2040274f9e5efe773fc0
       KICAD_BUILD_CONFIG: kicad-10.0.8
       VCPKG_BINARY_SOURCES: default;nuget,https://gitlab.com/api/v4/projects/27426693/packages/nuget/index.json,read
       GIT_CONFIG_COUNT: '1'
@@ -46,13 +48,27 @@ jobs:
 
           $source = Join-Path $builder '.build/kicad'
           New-Item -ItemType Directory -Force -Path (Split-Path $source) | Out-Null
-          git clone --no-hardlinks --no-checkout $env:GITHUB_WORKSPACE $source
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git -C $source checkout --detach $env:GITHUB_SHA
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ((git -C $source rev-parse HEAD) -ne $env:GITHUB_SHA) {
-            throw 'The source must match the selected fork revision.'
+          if (Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'CMakeLists.txt')) {
+            git clone --no-hardlinks --no-checkout $env:GITHUB_WORKSPACE $source
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            git -C $source checkout --detach $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $expected = $env:GITHUB_SHA
+            $origin = 'selected repository revision'
+          } else {
+            git clone --depth 1 --single-branch --branch $env:KICAD_UPSTREAM_TAG https://github.com/KiCad/kicad-source-mirror.git $source
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $expected = $env:KICAD_UPSTREAM_COMMIT
+            $origin = "upstream KiCad $env:KICAD_UPSTREAM_TAG"
           }
+
+          $actual = git -C $source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actual -ne $expected -or !(Test-Path -LiteralPath (Join-Path $source 'CMakeLists.txt'))) {
+            throw "KiCad source verification failed for $origin."
+          }
+          "KICAD_SOURCE_SHA=$actual" >> $env:GITHUB_ENV
+          "Source: $origin ($actual)" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Configure and build KiCad with Visual Studio
         run: |
@@ -105,7 +121,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $dist = New-Item -ItemType Directory -Path 'dist' -Force
-          $zip = Join-Path $dist.FullName "kicad-xsignal-test-windows-x64-$env:GITHUB_SHA.zip"
+          $zip = Join-Path $dist.FullName "kicad-xsignal-test-windows-x64-$env:KICAD_SOURCE_SHA.zip"
           Compress-Archive -Path (Join-Path $prefix '*') -DestinationPath $zip
           'Windows x64 portable lite build. Standard symbol, footprint and 3D libraries are separate.' >> $env:GITHUB_STEP_SUMMARY
 
