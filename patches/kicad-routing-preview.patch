@@ -1,0 +1,195 @@
+diff --git a/pcbnew/python/scripting/pcbnew_scripting_helpers.cpp b/pcbnew/python/scripting/pcbnew_scripting_helpers.cpp
+index c7912eec..e3b89b88 100644
+--- a/pcbnew/python/scripting/pcbnew_scripting_helpers.cpp
++++ b/pcbnew/python/scripting/pcbnew_scripting_helpers.cpp
+@@ -59,6 +59,9 @@
+ #include <project/project_file.h>
+ #include <settings/settings_manager.h>
+ #include <specctra.h>
++#include <router/router_tool.h>
++#include <tool/tool_manager.h>
++#include <wx/thread.h>
+ #include <project/project_local_settings.h>
+ #include <unordered_set>
+ #include <wildcards_and_files_ext.h>
+@@ -82,6 +85,16 @@ BOARD* GetBoard()
+ }
+ 
+ 
++wxString GetRoutingPreview()
++{
++    if( !wxIsMainThread() || !s_PcbEditFrame || !s_PcbEditFrame->GetToolManager() )
++        return {};
++
++    auto* router = s_PcbEditFrame->GetToolManager()->GetTool<ROUTER_TOOL>();
++    return router ? router->GetRoutingPreview() : wxString();
++}
++
++
+ void ScriptingSetPcbEditFrame( PCB_EDIT_FRAME* aPcbEditFrame )
+ {
+     s_PcbEditFrame = aPcbEditFrame;
+diff --git a/pcbnew/python/scripting/pcbnew_scripting_helpers.h b/pcbnew/python/scripting/pcbnew_scripting_helpers.h
+index be73483d..f2ca6460 100644
+--- a/pcbnew/python/scripting/pcbnew_scripting_helpers.h
++++ b/pcbnew/python/scripting/pcbnew_scripting_helpers.h
+@@ -49,6 +49,9 @@ void ScriptingOnDestructPcbEditFrame( PCB_EDIT_FRAME* aPCBEdaFrame );
+ // For Python scripts: return the current board.
+ BOARD*  GetBoard();
+ 
++// Snapshot of interactive routing for scripts on the UI thread; empty when idle.
++wxString GetRoutingPreview();
++
+ /**
+  * Loads a board from file using the specified file io handler
+  *
+diff --git a/pcbnew/router/router_tool.cpp b/pcbnew/router/router_tool.cpp
+index 8d337861..5b9d520a 100644
+--- a/pcbnew/router/router_tool.cpp
++++ b/pcbnew/router/router_tool.cpp
+@@ -81,6 +81,12 @@ using namespace std::placeholders;
+ #include "pns_logger.h"
+ #include "pns_placement_algo.h"
+ #include "pns_drag_algo.h"
++#include "pns_arc.h"
++#include "pns_line.h"
++#include "pns_segment.h"
++#include "pns_via.h"
++#include <netinfo.h>
++#include <nlohmann/json.hpp>
+ 
+ #include "pns_kicad_iface.h"
+ 
+@@ -2915,6 +2921,119 @@ int ROUTER_TOOL::onTrackViaSizeChanged( const TOOL_EVENT& aEvent )
+ }
+ 
+ 
++
++wxString ROUTER_TOOL::GetRoutingPreview()
++{
++    if( !m_router || !m_iface )
++        return {};
++
++    const auto state = m_router->GetState();
++
++    if( state != PNS::ROUTER::ROUTE_TRACK && state != PNS::ROUTER::DRAG_SEGMENT )
++        return {};
++
++    std::vector<PNS::ITEM*> removed, added, heads;
++    m_router->GetUpdatedItems( removed, added, heads );
++    std::vector<std::unique_ptr<PNS::ITEM>> ownedHeads;
++
++    for( PNS::ITEM* item : heads )
++        ownedHeads.emplace_back( item );
++
++    using nlohmann::json;
++    json snapshot = { { "version", 1 }, { "removed", json::array() },
++                      { "tracks", json::array() } };
++    json& tracks = snapshot["tracks"];
++
++    for( const PNS::ITEM* item : removed )
++    {
++        if( const BOARD_ITEM* parent = item->Parent();
++            parent && parent->IsType( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )
++        {
++            snapshot["removed"].push_back( parent->m_Uuid.AsString().ToStdString() );
++        }
++    }
++
++    auto addSegment = [&]( int net, int layer, const SEG& segment )
++    {
++        tracks.push_back( { 0, net, layer, segment.A.x, segment.A.y, segment.B.x, segment.B.y } );
++    };
++
++    auto addArc = [&]( int net, int layer, const SHAPE_ARC& arc )
++    {
++        const VECTOR2I& start = arc.GetP0();
++        const VECTOR2I& mid = arc.GetArcMid();
++        const VECTOR2I& end = arc.GetP1();
++        tracks.push_back( { 1, net, layer, start.x, start.y, mid.x, mid.y, end.x, end.y } );
++    };
++
++    auto addVia = [&]( int net, const PNS::VIA& via )
++    {
++        const VECTOR2I& pos = via.Pos();
++        tracks.push_back( { 2, net, m_iface->GetBoardLayerFromPNSLayer( via.Layers().Start() ),
++                            m_iface->GetBoardLayerFromPNSLayer( via.Layers().End() ),
++                            static_cast<int>( via.ViaType() ), pos.x, pos.y } );
++    };
++
++    auto append = [&]( const PNS::ITEM& item )
++    {
++        const auto* net = static_cast<const NETINFO_ITEM*>( item.Net() );
++
++        if( item.IsVirtual() || !net || net->GetNetCode() <= 0 )
++            return;
++
++        const int netcode = net->GetNetCode();
++        const int layer = m_iface->GetBoardLayerFromPNSLayer( item.Layers().Start() );
++
++        switch( item.Kind() )
++        {
++        case PNS::ITEM::SEGMENT_T:
++            addSegment( netcode, layer, static_cast<const PNS::SEGMENT&>( item ).Seg() );
++            break;
++        case PNS::ITEM::ARC_T:
++            addArc( netcode, layer, static_cast<const PNS::ARC&>( item ).CArc() );
++            break;
++        case PNS::ITEM::VIA_T:
++            addVia( netcode, static_cast<const PNS::VIA&>( item ) );
++            break;
++        case PNS::ITEM::LINE_T:
++        {
++            const auto& line = static_cast<const PNS::LINE&>( item );
++            const SHAPE_LINE_CHAIN& chain = line.CLine();
++
++            for( int i = 0; i < chain.SegmentCount(); ++i )
++            {
++                if( !chain.IsArcSegment( i ) )
++                    addSegment( netcode, layer, chain.CSegment( i ) );
++            }
++
++            for( const SHAPE_ARC& arc : chain.CArcs() )
++                addArc( netcode, layer, arc );
++
++            if( line.EndsWithVia() )
++                addVia( netcode, line.Via() );
++
++            break;
++        }
++        default:
++            break;
++        }
++    };
++
++    for( const PNS::ITEM* item : added )
++        append( *item );
++
++    // During a drag the added items already describe everything shown by updateView().
++    // During routing the cursor-attached heads are drawn separately.
++    if( state == PNS::ROUTER::ROUTE_TRACK )
++    {
++        for( const auto& item : ownedHeads )
++            append( *item );
++    }
++
++    return wxString::FromUTF8( snapshot.dump() );
++}
++
++
+ void ROUTER_TOOL::UpdateMessagePanel()
+ {
+     std::vector<MSG_PANEL_ITEM> items;
+diff --git a/pcbnew/router/router_tool.h b/pcbnew/router/router_tool.h
+index 492b164f..bd09722d 100644
+--- a/pcbnew/router/router_tool.h
++++ b/pcbnew/router/router_tool.h
+@@ -60,6 +60,8 @@ public:
+      */
+     bool RoutingInProgress();
+ 
++    wxString GetRoutingPreview();
++
+     void setTransitions() override;
+ 
+     // A filter for narrowing a collection representing a simple corner
