@@ -148,7 +148,20 @@ jobs:
           $env:KICAD_CONFIG_HOME = Join-Path $env:RUNNER_TEMP 'kicad-smoke-config'
           & (Join-Path $bin 'kicad-cli.exe') version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $bin 'python.exe') -c 'import os, pcbnew, wx; print(pcbnew.Version()); print(wx.version()); assert not os.getenv("KICAD_EXPECT_ROUTER_PREVIEW") or callable(getattr(pcbnew, "GetRoutingPreview", None))'
+          # Windows PowerShell 5.1 strips embedded double quotes in native -c arguments.
+          $smokeTest = @'
+          import os
+          import pcbnew
+          import wx
+
+          print(pcbnew.Version())
+          print(wx.version())
+          if os.getenv("KICAD_EXPECT_ROUTER_PREVIEW"):
+              if not callable(getattr(pcbnew, "GetRoutingPreview", None)):
+                  raise SystemExit("Expected pcbnew.GetRoutingPreview() in the packaged build")
+              print("Verified pcbnew.GetRoutingPreview()")
+          '@
+          $smokeTest | & (Join-Path $bin 'python.exe') -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $dist = New-Item -ItemType Directory -Path 'dist' -Force
