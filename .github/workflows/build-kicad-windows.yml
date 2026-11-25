@@ -81,6 +81,13 @@ jobs:
           & $driver -Vcpkg -Arch x64 -BuildConfigName $env:KICAD_BUILD_CONFIG
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          # The pinned builder initializes vcpkg with UseMsvcCmake=False.
+          # Keep the same CMake selection when its packaging step starts a fresh shell.
+          $vcpkg = Join-Path $builder 'vcpkg'
+          & $driver -Config -VcpkgPath $vcpkg -UseMsvcCmake $true
+          $settings = Get-Content -LiteralPath (Join-Path $builder 'settings.json') -Raw | ConvertFrom-Json
+          if ($settings.UseMsvcCmake -ne $true) { throw 'Could not persist UseMsvcCmake=true.' }
+
           $source = Join-Path $builder '.build/kicad'
           $build = Join-Path $source 'build/x64-windows-Release'
           $prefix = Join-Path $builder '.out/x64-windows-Release'
@@ -108,11 +115,20 @@ jobs:
           cmake --build $build --parallel 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          # Check the actual install tree before preparing the portable runtime.
+          cmake --install $build --prefix $prefix
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path -LiteralPath (Join-Path $prefix 'bin/kicad-cli.exe'))) {
+            throw "CMake did not install kicad-cli.exe into $prefix/bin."
+          }
+
       - name: Package the lite runtime and verify it
         shell: powershell
         run: |
           $builder = Join-Path $env:RUNNER_TEMP 'kb'
           $driver = Join-Path $builder 'build.ps1'
+          $settings = Get-Content -LiteralPath (Join-Path $builder 'settings.json') -Raw | ConvertFrom-Json
+          if ($settings.UseMsvcCmake -ne $true) { throw 'Packaging requires the same Visual Studio CMake as the build.' }
           & $driver -PreparePackage -Arch x64 -BuildConfigName $env:KICAD_BUILD_CONFIG -Lite
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $prefix = Join-Path $builder '.out/x64-windows-Release'
