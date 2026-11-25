@@ -1,0 +1,73 @@
+name: KiCad test build (Linux x64)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out the selected fork revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Ubuntu build dependencies
+        run: |
+          sudo add-apt-repository --yes --enable-source ppa:kicad/kicad-10.0-releases
+          sudo apt-get update
+          sudo apt-get build-dep --assume-yes kicad
+          sudo apt-get install --assume-yes --no-install-recommends cmake ninja-build \
+            python3-wxgtk4.0 swig xvfb xauth
+
+      - name: Configure and build KiCad
+        run: |
+          cmake -S . -B "$RUNNER_TEMP/kicad-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/opt/kicad-xsignal-test \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+            -DKICAD_SCRIPTING_WXPYTHON=ON \
+            -DKICAD_BUILD_QA_TESTS=OFF \
+            -DKICAD_USE_SENTRY=OFF
+          cmake --build "$RUNNER_TEMP/kicad-build" --parallel 2
+
+      - name: Stage and verify the test build
+        run: |
+          stage="$RUNNER_TEMP/kicad-stage"
+          prefix="$stage/opt/kicad-xsignal-test"
+          DESTDIR="$stage" cmake --install "$RUNNER_TEMP/kicad-build"
+          export LD_LIBRARY_PATH="$prefix/lib"
+          export KICAD_CONFIG_HOME="$RUNNER_TEMP/kicad-smoke-config"
+          "$prefix/bin/kicad-cli" version
+          bindings="$(find "$prefix" -type f -name pcbnew.py -print -quit)"
+          test -n "$bindings"
+          PYTHONPATH="$(dirname "$bindings")" xvfb-run -a /usr/bin/python3 \
+            -c 'import pcbnew, wx; print(pcbnew.Version()); print(wx.version())'
+
+      - name: Package the Linux files
+        run: |
+          mkdir -p dist
+          tar -C "$RUNNER_TEMP/kicad-stage/opt" \
+            -czf "dist/kicad-xsignal-test-ubuntu24.04-x86_64-$GITHUB_SHA.tar.gz" kicad-xsignal-test
+          {
+            echo 'Ubuntu 24.04 x86-64. The archive stages an installation under /opt/kicad-xsignal-test.'
+            echo 'Runtime dependencies and standard libraries are supplied by the KiCad 10.0 Ubuntu packages.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the test build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: kicad-xsignal-test-ubuntu24.04-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
